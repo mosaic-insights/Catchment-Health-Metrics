@@ -167,6 +167,14 @@ This package is licensed under the **MIT License**.
 
 ## Acknowledgements
 
-Developed for catchment health assessment in Australian contexts.  
-Datasets and services credited to their respective providers (e.g., Geoscience Australia, DEA, BoM AWRA-L, AGCD, ABARES).  
-**Maintainer**: Jabbar Khaledi – [jabbarkhaledi88@gmail.com]
+This project has been developed for **Water Research Australia** by the **Alluvium group**,  
+for catchment health assessment in Australian contexts.  
+
+Datasets and services are credited to their respective providers, including:  
+- Geoscience Australia (GA DEM)  
+- Digital Earth Australia (DEA)  
+- Bureau of Meteorology (BoM AWRA-L)  
+- Australian Gridded Climate Data (AGCD)  
+- ABARES (Land use datasets)  
+
+**Maintainer**: Jabbar Khaledi – [jabbarkhaledi88@gmail.com](mailto:jabbarkhaledi88@gmail.com)
