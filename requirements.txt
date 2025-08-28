@@ -1,0 +1,30 @@
+# === Array / SciPy stack ===
+numpy>=1.24
+pandas>=2.0
+scipy>=1.11
+matplotlib>=3.8
+tqdm>=4.66
+
+# === Geospatial core ===
+xarray>=2023.12.0
+rasterio>=1.3
+rioxarray>=0.15
+geopandas>=0.14
+shapely>=2.0
+pyproj>=3.6
+affine>=2.4
+
+# === STAC / remote sensing ===
+pystac-client>=0.7    # import name: pystac_client
+odc-stac>=0.3         # import name: odc.stac
+
+# === Hydro tools ===
+pysheds>=0.3
+
+# === IO / utilities ===
+requests>=2.31
+
+# === DEA tools (optional; heavy) ===
+# dea-tools>=0.3      # import name: dea_tools
+# NOTE: dea-tools may require system deps (e.g., GDAL stack). Consider leaving it optional.
+

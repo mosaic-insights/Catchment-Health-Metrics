@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+title: Catchment Health Metrics (CHM)
+message: If you use this software, please cite it as below.
+type: software
+authors:
+  - family-names: Khaledi
+    given-names: Jabbar
+    email: jabbarkhaledi88@gmail.com
+version: 0.1.0
+repository-code: https://github.com/mosaic-insights/Catchment_Health_Metrics
+license: ISC
+date-released: 2025-08-28

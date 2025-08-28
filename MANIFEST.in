@@ -1,0 +1,7 @@
+
+include LICENSE
+include README.md
+recursive-include src *.py
+recursive-include tests *.py
+recursive-include examples *.*
+prune src/chm/.ipynb_checkpoints
