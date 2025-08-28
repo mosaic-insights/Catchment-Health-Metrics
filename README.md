@@ -31,6 +31,16 @@ pip install .
 
 # Editable / development mode
 pip install -e .
+
+# Recommended: Use a clean environment
+# (Because CHM depends on several heavy geospatial libraries,
+#  we recommend installing it into a fresh environment to avoid dependency conflicts)
+
+conda create -n chm python=3.11 -y
+conda activate chm
+pip install -e .[dev]
+pytest -q
+
 ```
 
 Python 3.10+ is required.
