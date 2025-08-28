@@ -153,7 +153,7 @@ landuse_risk_profile(
 ## Worked Example
 
 A full worked example, showing usage of the high-level interface, is provided in the
-[CHM_Quickstart notebook](examples/CHM_Quickstart.ipynb).
+[CHM_Quickstart notebook](examples/CHM_example.ipynb).
 
 This notebook demonstrates how to run the package end-to-end using example inputs, with step-by-step descriptions before each cell.
 
