@@ -1,41 +1,45 @@
 # Catchment Health Metrics (CHM)
 
-**CHM** is a Python library for assessing **catchment health**.  
-It automates the retrieval and processing of topography, hydroclimate, vegetation, bushfire, road, and land use datasets for a given catchment boundary.  
-From these datasets it generates groundwater and surface connectivity metrics (e.g., **Topographic Wetness Index (TWI)**, **Sediment Delivery Ratio (SDR)**) and uses them to create **risk profiles** for vegetation (NDVI), bushfire, roads, and land use (e.g., plantation forests, mining, industry, transport, residential, irrigation, cropping, and horticulture).  
+**CHM** — *Catchment Health Metrics* — is a Python library for assessing **catchment health condition**.  
+It automates the **end-to-end workflow** for evaluating catchment environmental condition using geospatial, hydrological, and remote sensing datasets.
 
-The package is built with a **src/** layout for clean packaging and development with `pip install -e .`.  
-It is tailored for **Australian conditions and datasets** (e.g., GA DEM, AWRA-L, DEA/AGCD) but the structure is flexible for adaptation elsewhere.
+CHM can **automatically download, process, and analyse** spatial and temporal data to generate **metrics, indices, and visual outputs** that describe:
+- Environmental condition  
+- Landscape function  
+- Erosion and sediment connectivity risk  
 
 ---
 
-## Features
 
-- **Topography**: DEM acquisition (GA WCS) and generation of slope, aspect, TPI, TRI, LS factor  
-- **Connectivity**: Flow accumulation, SDR, TWI, sediment connectivity indices  
-- **Vegetation & C-factor**: NDVI time series, C-factor derivation, summaries  
-- **RUSLE & SDR-RUSLE**: Daily and annual erosion/sediment delivery estimates  
-- **Hydroclimate**: Precipitation and temperature (AWAP/AGCD), runoff, ET, and soil moisture (AWRA-L, historical & projections)  
-- **Bushfire**: Historical fire severity integration  
-- **Roads**: National roads dataset and connectivity overlay  
-- **Land Use (2023)**: Summaries for plantation forestry, mining, industry, cropping, horticulture, and more  
-- **Pipelines**: Chain modules for reproducible end-to-end workflows  
+## Key Features
+
+| Domain | Description |
+|---------|--------------|
+| **Topography** | DEM acquisition and processing (GA WCS) for slope, aspect, LS factor, TPI, TRI |
+| **Connectivity** | Flow accumulation, Topographic Wetness Index (TWI), Sediment Delivery Ratio (SDR), and hydrological connectivity indices |
+| **Vegetation & C-Factor** | Automated NDVI calculation (DEA Landsat/Sentinel), C-factor derivation, riparian NDVI analysis, and annual summaries |
+| **RUSLE & SDR-RUSLE** | Annual soil loss and delivered sediment (A = R × K × LS × C × P × SDR) |
+| **Hydroclimate (Historical)** | Daily precipitation and temperature (AGCD/AWAP) and daily runoff, ET, and soil moisture (AWRA-L) |
+| **Hydroclimate (Projections)** | Future hydrologic projections (Runoff, ET, Soil Moisture) via NCI THREDDS OPeNDAP |
+| **Land Use (2023)** | Summaries by land use type, with SDR-based risk profiles |
+| **DEA Land Cover Change** | Annual trend analysis using DEA Land Cover mosaics |
+| **Bushfire** | Historical fire extent overlay, multi-year exposure window, and AUC metrics (burned area vs. SDR/TWI) |
+| **Roads** | Road density and SDR/TWI connectivity exposure profiles with annual AUC metrics |
+| **Monitoring Data** | Automated ingestion of per-site Excel files, summary statistics, thresholding, and visualisation |
+| **Report Builder** | Automatically compiles all CHM module outputs into a formatted Word report (DOCX) for each catchment |
 
 ---
 
 ## Installation
 
 ```bash
-# From a local clone
+# Standard installation
 pip install .
 
 # Editable / development mode
 pip install -e .
 
-# Recommended: Use a clean environment
-# (Because CHM depends on several heavy geospatial libraries,
-#  we recommend installing it into a fresh environment to avoid dependency conflicts)
-
+# Recommended workflow (with conda)
 conda create -n chm python=3.11 -y
 conda activate chm
 pip install -e .[dev]
@@ -93,16 +97,26 @@ CHM expects the following inputs (many auto-downloaded via pipelines):
 ## Output structure (example)
 
 ```
-Catchment Name (e.g., Coliban River)
+Catchment_Name/
 ├── Catchment Datasets
-│   ├── Bushfire
-│   ├── Hydrology
-│   ├── Landuse
-│   ├── National Roads
-│   ├── RUSLE and SDR_RUSLE
-│   ├── Surface and Groundwater Connectivity
 │   ├── Topography
-│   └── Vegetation
+│   ├── Vegetation
+│   │   ├── Satellite data
+│   │   ├── Indices
+│   │   │   ├── NDVI
+│   │   │   └── C Factor
+│   │   └── Riparian
+│   ├── Surface and Groundwater Connectivity
+│   ├── RUSLE and SDR_RUSLE
+│   ├── Hydroclimate
+│   │   ├── Historical
+│   │   └── Projections
+│   ├── Landuse
+│   │   ├── DEA Landcover and Landuse 2023
+│   │   └── Catchment Scale Landuse
+│   ├── Historical Bushfire
+│   ├── National Roads
+│   └── Monitoring Data
 ├── Sites Datasets
 │   ├── Site_1
 │   ├── Site_2
@@ -119,32 +133,53 @@ Catchment Name (e.g., Coliban River)
 ## Project structure
 
 ```
-catchment-metrics/
-  pyproject.toml
-  README.md
-  LICENSE
-  .gitignore
-  .pre-commit-config.yaml
-  .github/workflows/ci.yml
-  examples/
-    CHM_Quickstart.ipynb
-  src/chm/
-    __init__.py
-    cli.py
-    dem_and_terrain.py
-    veg_indices_and_c_factor.py
-    surface_ground_water_connectivity.py
-    rusle_and_sdr_rusle.py
-    awap_historical_data.py
-    awra_historical_data.py
-    awra_projections_data.py
-    historical_bushfire_risk_profile.py
-    national_roads_risk_profile.py
-    landuse_risk_profile.py
-    appending_monitoring_data.py
-  tests/
-    test_imports.py
-    Input data/
+catchment-health-metrics/
+│
+├── pyproject.toml
+├── setup.py
+├── README.md
+├── LICENSE
+├── requirements.txt
+├── .gitignore
+├── .gitattributes
+├── .editorconfig
+├── .pre-commit-config.yaml
+├── .github/
+│ └── workflows/
+│ └── ci.yml
+│
+├── examples/
+│ ├── CHM_Quickstart.ipynb
+│ └── CHM_Example_Pipeline.ipynb
+│
+├── src/
+│ └── chm/
+│ ├── init.py
+│ ├── cli.py
+│ ├── utils/
+│ │ ├── paths.py
+│ │ ├── plots.py
+│ │ └── helpers.py
+│ │
+│ ├── topography.py
+│ ├── vegetation.py
+│ ├── connectivity.py
+│ ├── rusle.py
+│ ├── hydroclimate_historical.py
+│ ├── hydroclimate_projection.py
+│ ├── landuse_2023.py
+│ ├── dea_landuse.py
+│ ├── bushfire.py
+│ ├── roads.py
+│ ├── monitoring_data.py
+│ ├── generate_report.py
+│ └── py.typed
+│
+└── tests/
+├── test_imports.py
+├── test_functions.py
+├── Input data/
+└── sample_configs/
 ```
 
 ---
@@ -152,12 +187,20 @@ catchment-metrics/
 ## Example usage
 
 ```python
-from chm import landuse_risk_profile
+from chm import veg_indices_and_c_factor, rusle_and_sdr_rusle, build_report
+from chm.veg_indices import VegConfig
 
-landuse_risk_profile(
-    CHM_Work_Space,
-    Catchment_Shapefile_Path
+cfg = VegConfig(
+    chm_workspace=r"C:\CHM\Output",
+    catchment_path=r"C:\CHM\Input\Catchment\Coliban_River.shp",
+    sites_path=r"C:\CHM\Input\Sites\Coliban_Sites.shp",
+    datetime_range="2010-01-01/2025-10-25",
+    cloud_cover_lt=20,
+    riparian_buffer_m=30
 )
+
+veg_indices_and_c_factor(cfg)
+build_report(r"C:\CHM\Output", r"C:\CHM\Input\Catchment\Coliban_River.shp")
 ```
 
 ## Worked Example
