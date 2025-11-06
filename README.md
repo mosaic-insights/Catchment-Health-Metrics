@@ -76,21 +76,33 @@ pip install numpy pandas scipy matplotlib rasterio rioxarray geopandas shapely p
 
 ---
 
-## Data requirements
+## Data Requirements
 
-CHM expects the following inputs (many auto-downloaded via pipelines):
+CHM expects the following input datasets — many of which are **automatically downloaded and processed** through the CHM pipelines.  
+User-provided layers (e.g., catchment and site shapefiles) define spatial context for all analyses.
 
-| Data | Source | Usage |
-|------|--------|-------|
-| Catchment boundary (polygon) | User-provided shapefile | Defines extent and clipping |
-| Sites (points) | User-provided | For per-site statistics and local catchments |
-| DEM | GA SRTM 1-Sec Hydro-Enforced (DEA/GA WCS) | Terrain metrics |
-| Vegetation | DEA Sentinel/Landsat via STAC | NDVI & C-factor |
-| Soil erosion factors | K-factor from SLGA (user-provided), others derived | RUSLE inputs |
-| Bushfire | National/state fire layers | Risk profile |
-| Land use | ABARES/GA land use dataset (2023) | Risk profile |
-| Roads | National roads dataset | Risk profile |
-| Hydroclimate | AGCD/AWAP (precip, tmin, tmax), AWRA-L historical & projections (runoff, ET, soil moisture) | Hydroclimate metrics |
+| Data | Source | Purpose / Usage |
+|------|---------|----------------|
+| **Catchment boundary (polygon)** | User-provided shapefile | Defines spatial extent for all modules and clipping boundaries |
+| **Monitoring sites (points/polygons)** | User-provided | Used for per-site analysis, zonal statistics, and report generation |
+| **DEM (Digital Elevation Model)** | GA SRTM 1-Sec Hydro-Enforced via DEA WCS | Foundation for slope, aspect, LS factor, flow direction, and flow accumulation |
+| **Vegetation indices (NDVI, C-factor)** | DEA Landsat / Sentinel-2 via STAC API | Derivation of NDVI, C-factor, and riparian NDVI metrics |
+| **Soil erosion factors (R, K, P)** | K-factor from SLGA or user input; R/P from AWRA-L or empirical rules | Inputs to RUSLE and SDR-RUSLE erosion modelling |
+| **Hydroclimate – Historical** | AGCD (AWAP) precipitation & temperature; AWRA-L runoff, ET, soil moisture | Long-term daily catchment and site-scale hydroclimate metrics |
+| **Hydroclimate – Projections** | AWRAL hydrologic projections via NCI THREDDS (Historical, RCP4.5, RCP8.5) | Future hydroclimate scenario analysis |
+| **Bushfire polygons** | National/state fire history datasets or ArcGIS REST service | Fire exposure profiling and AUC time-series (burned area vs SDR/TWI) |
+| **Land use (2023)** | ABARES / DEA Land Cover | SDR-based exposure and temporal trend analysis |
+| **DEA Land Cover (annual mosaics)** | Geoscience Australia (DEA) | Multi-year land-cover trend and change analysis |
+| **Road networks** | National Roads dataset (ArcGIS REST or local file) | SDR/TWI exposure profiles and connectivity risk assessment |
+| **Monitoring data (field Excel files)** | User-provided (e.g., Site_7.xlsx) | Water-quality time-series, exceedance metrics, and per-site statistics |
+
+---
+
+### Notes
+
+- Most datasets are **auto-retrieved** (DEA, AWRA-L, AGCD, NCI THREDDS) through CHM’s internal STAC or REST pipelines.  
+- User input is required only for **catchment**, **site**, and **monitoring** layers — ensuring flexibility across projects.  
+- All rasters are **harmonised to the DEM grid** for consistent resolution and CRS alignment across modules.
 
 ---
 
