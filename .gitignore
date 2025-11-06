@@ -65,3 +65,25 @@ __*.ipynb
 
 *.code-workspace
 *.py.prof
+
+# Project outputs
+/tests/Output/
+**/Output/
+
+# Raster & imagery (large)
+**/*.tif
+**/*.tiff
+**/*.nc
+**/*.png
+**/*.jpg
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Caches
+__pycache__/
+.ipynb_checkpoints/
+.pytest_cache/
+**/.ruff_cache/
