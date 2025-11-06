@@ -18,18 +18,19 @@ def app():
 
     if args.check:
         modules = [
-            "chm.topography",
-            "chm.vegetation",
-            "chm.connectivity",
-            "chm.rusle",
-            "chm.hydroclimate_awap",
-            "chm.hydroclimate_awral_historical",
-            "chm.hydroclimate_awral_projection",
-            "chm.landuse",
-            "chm.bushfire",
-            "chm.roads",
-            "chm.monitoring_data",
-        ]
+    "chm.topography",
+    "chm.vegetation",
+    "chm.connectivity",
+    "chm.rusle",
+    "chm.hydroclimate_historical",
+    "chm.hydroclimate_projection",
+    "chm.landuse_2023",
+    "chm.dea_landuse",
+    "chm.bushfire",
+    "chm.roads",
+    "chm.monitoring_data",
+    "chm.generate_report",
+]
         failed = []
         for m in modules:
             try:
