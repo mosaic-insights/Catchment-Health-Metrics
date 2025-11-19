@@ -8,8 +8,7 @@ import io
 import gc
 import copy
 from dataclasses import dataclass
-from typing import Dict, Tuple, Optional, Iterable
-
+from typing import Dict, Tuple, Optional, Iterable, Union
 # --- Arrays & Data ---
 import numpy as np
 import pandas as pd
@@ -29,7 +28,8 @@ from shapely.geometry import Point, LineString, shape as shp_shape
 # --- Hydro / RS ---
 from pysheds.grid import Grid
 from rasterstats import zonal_stats
-
+import tempfile
+from rasterio.merge import merge as rio_merge
 # --- Viz ---
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
@@ -81,19 +81,63 @@ def _ensure_dirs(paths: Iterable[str]) -> None:
     for p in paths:
         os.makedirs(p, exist_ok=True)
 
+def _crs_from_user_input(crs_like) -> Optional[rio.crs.CRS]:
+    """
+    Accepts int (e.g., 3308), str (e.g., 'EPSG:3308'), dict/WKT/PROJJSON.
+    Returns a rasterio CRS or None.
+    """
+    if crs_like is None:
+        return None
+    try:
+        return rio.crs.CRS.from_user_input(crs_like)
+    except Exception as e:
+        raise ValueError(f"Invalid CRS provided for 'catchment_crs': {crs_like!r} ({e})")
 
-def _read_catchment(catchment_path: str) -> gpd.GeoDataFrame:
-    """Read & dissolve catchment; add area and placeholder date column."""
+def _read_catchment(catchment_path: str, catchment_crs: Optional[Union[int, str, dict]] = None) -> gpd.GeoDataFrame:
+    """
+    Read & dissolve catchment; ensure CRS according to catchment_crs; add area (ha) and date column.
+
+    Notes
+    -----
+    - If the source has no CRS and 'catchment_crs' is provided, the CRS is *assigned* (no reprojection).
+    - If the source has a CRS and 'catchment_crs' is provided, the layer is *reprojected* to it.
+    """
     if not os.path.exists(catchment_path):
         raise FileNotFoundError(f"Catchment file not found: {catchment_path}")
+
     gdf = gpd.read_file(catchment_path)
     if gdf.empty:
         raise ValueError("Catchment file has no features.")
+
+    # Normalize the requested CRS (if any)
+    desired_crs = _crs_from_user_input(catchment_crs)
+
+    if gdf.crs is None:
+        # No CRS on disk
+        if desired_crs is None:
+            raise ValueError(
+                "Catchment file has no CRS. Please provide 'catchment_crs' (e.g., 3308 or 'EPSG:3308')."
+            )
+        # Assign (do NOT reproject) because there is no CRS to transform from
+        gdf = gdf.set_crs(desired_crs, allow_override=True)
+    else:
+        # Has CRS; reproject if a target was given and differs
+        if desired_crs is not None and rio.crs.CRS.from_user_input(gdf.crs) != desired_crs:
+            gdf = gdf.to_crs(desired_crs)
+
+    # Dissolve to a single catchment polygon
     gdf = gdf.dissolve()
-    # Area in hectares in native CRS units (assumes projected metres; if geographic, user should reproject)
-    gdf["Area_ha"] = round(gdf.geometry.area.values[0] / 10_000.0, 0)
+
+    # Safety: ensure projected (metres) for area computation
+    crs_obj = rio.crs.CRS.from_user_input(gdf.crs)
+    if crs_obj.is_geographic:
+        raise ValueError(
+            f"Catchment CRS is geographic ({gdf.crs}). Please use a projected CRS in metres "
+            f"(e.g., EPSG:3308 GDA94/NSW Lambert) via 'catchment_crs'."
+        )
     gdf["Date"] = pd.Series(pd.NA, index=gdf.index, dtype="Int64")
     return gdf
+
 
 
 def _bbox_wgs84(gdf: gpd.GeoDataFrame) -> Tuple[float, float, float, float]:
@@ -102,42 +146,130 @@ def _bbox_wgs84(gdf: gpd.GeoDataFrame) -> Tuple[float, float, float, float]:
     return tuple(gdf_wgs84.total_bounds)
 
 
-def _download_dem_wcs(dem_url: str, bbox: Tuple[float, float, float, float], out_tif: str) -> None:
-    """Download DEM from a WCS endpoint to GeoTIFF clipped to bbox (EPSG:4326)."""
+def _download_dem_wcs(
+    dem_url: str,
+    bbox: Tuple[float, float, float, float],
+    out_tif: str,
+    *,
+    # If either dimension exceeds this many pixels (at 1 arcsec), switch to tiling
+    tile_when_px_over: int = 4000,
+    # Tile grid (cols, rows) when tiling kicks in
+    tile_cols_rows: Tuple[int, int] = (2, 2),
+) -> None:
+    """
+    Download DEM from a WCS endpoint to GeoTIFF clipped to bbox (EPSG:4326).
+
+    Behavior:
+      - SMALL bbox  -> single request (original behavior)
+      - LARGE bbox  -> split into tiles (e.g., 2×2), fetch each with the SAME
+                       WCS parameters (coverage/crs/format), then mosaic.
+    """
     minx, miny, maxx, maxy = bbox
-    # 1 arc-sec ≈ 0.000277778 deg
+
+    # 1 arc-sec ≈ 0.000277778 deg (unchanged from your original)
     resolution_deg = 1 / 3600.0
-    width = max(1, int((maxx - minx) / resolution_deg))
-    height = max(1, int((maxy - miny) / resolution_deg))
+    full_w = max(1, int(round((maxx - minx) / resolution_deg)))
+    full_h = max(1, int(round((maxy - miny) / resolution_deg)))
 
-    params = {
-        "service": "WCS",
-        "version": "1.0.0",
-        "request": "GetCoverage",
-        "coverage": "1",           # may vary per service
-        "crs": "EPSG:4326",
-        "bbox": f"{minx},{miny},{maxx},{maxy}",
-        "width": width,
-        "height": height,
-        "format": "GeoTIFF"
-    }
-    r = requests.get(dem_url, params=params, stream=True, timeout=120)
-    if r.status_code != 200 or "image/tiff" not in r.headers.get("Content-Type", ""):
-        # Show a helpful snippet for debugging
-        snippet = ""
-        try:
-            snippet = r.content[:500]
-        except Exception:
-            pass
-        raise RuntimeError(
-            f"DEM WCS download failed (status={r.status_code}, ctype={r.headers.get('Content-Type')}). "
-            f"Server said (first 500 bytes): {snippet!r}"
-        )
+    def _single_request(_bbox, _out_path):
+        """Original single-tile request (kept exactly the same aside from computed size)."""
+        _minx, _miny, _maxx, _maxy = _bbox
+        _width  = max(1, int(round((_maxx - _minx) / resolution_deg)))
+        _height = max(1, int(round((_maxy - _miny) / resolution_deg)))
 
-    with open(out_tif, "wb") as f:
-        for chunk in r.iter_content(chunk_size=8192):
-            if chunk:
-                f.write(chunk)
+        params = {
+            "service": "WCS",
+            "version": "1.0.0",
+            "request": "GetCoverage",
+            "coverage": "1",           # same as your original
+            "crs": "EPSG:4326",
+            "bbox": f"{_minx},{_miny},{_maxx},{_maxy}",
+            "width": _width,
+            "height": _height,
+            "format": "GeoTIFF",
+        }
+        r = requests.get(dem_url, params=params, stream=True, timeout=180)
+        ctype = (r.headers.get("Content-Type") or "").lower()
+        if r.status_code != 200 or ("tiff" not in ctype and "geotiff" not in ctype):
+            snippet = ""
+            try:
+                snippet = "\n".join((r.text or "").splitlines()[:8])
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"DEM WCS download failed (status={r.status_code}, ctype={ctype}).\n"
+                f"URL: {r.url}\n"
+                f"Server said:\n{snippet}"
+            )
+
+        os.makedirs(os.path.dirname(_out_path), exist_ok=True)
+        with open(_out_path, "wb") as f:
+            for chunk in r.iter_content(8192):
+                if chunk:
+                    f.write(chunk)
+
+    # If small enough, do exactly one request (original behavior)
+    if full_w <= tile_when_px_over and full_h <= tile_when_px_over:
+        _single_request(bbox, out_tif)
+        return
+
+    # Otherwise: tile (e.g., 2×2) and mosaic — requests look the same, only bbox & size differ
+    ncols, nrows = tile_cols_rows
+    # Small overlap to prevent hairline seams due to rounding at tile edges
+    eps = 1e-9
+
+    xs = np.linspace(minx, maxx, ncols + 1)
+    ys = np.linspace(miny, maxy, nrows + 1)
+
+    tmp_files: list[str] = []
+    srcs: list[rio.DatasetReader] = []
+    try:
+        # Request each tile
+        tile_idx = 0
+        for r in range(nrows):
+            for c in range(ncols):
+                t_minx = xs[c]
+                t_maxx = xs[c + 1]
+                t_miny = ys[r]
+                t_maxy = ys[r + 1]
+
+                # Apply tiny overlaps to avoid seams
+                if c > 0:       t_minx -= eps
+                if c < ncols-1: t_maxx += eps
+                if r > 0:       t_miny -= eps
+                if r < nrows-1: t_maxy += eps
+
+                tile_idx += 1
+                tmp_path = tempfile.NamedTemporaryFile(suffix=".tif", delete=False).name
+                _single_request((t_minx, t_miny, t_maxx, t_maxy), tmp_path)
+                tmp_files.append(tmp_path)
+
+        # Mosaic all tiles into one
+        for p in tmp_files:
+            srcs.append(rio.open(p))
+
+        mosaic, out_transform = rio_merge(srcs)  # preserves band count/dtype
+        meta = srcs[0].meta.copy()
+        meta.update({
+            "driver": "GTiff",
+            "count": mosaic.shape[0],
+            "height": mosaic.shape[1],
+            "width": mosaic.shape[2],
+            "transform": out_transform,
+            # nodata/dtype as delivered by service
+        })
+
+        os.makedirs(os.path.dirname(out_tif), exist_ok=True)
+        with rio.open(out_tif, "w", **meta) as dst:
+            dst.write(mosaic)
+
+    finally:
+        for s in srcs:
+            try: s.close()
+            except Exception: pass
+        for p in tmp_files:
+            try: os.remove(p)
+            except Exception: pass
 
 
 def _clip_to_catchment_wgs84(src_path: str, catchment_wgs84: gpd.GeoDataFrame, out_path: str) -> None:
@@ -153,7 +285,6 @@ def _clip_to_catchment_wgs84(src_path: str, catchment_wgs84: gpd.GeoDataFrame, o
         # Convert nodata to NaN
         clipped = clipped.where(clipped != clipped.rio.nodata, np.nan)
         clipped.rio.to_raster(out_path)
-
 
 def _reproject_dem_to_catchment(
     dem_wgs84_path: str,
@@ -186,7 +317,6 @@ def _reproject_dem_to_catchment(
                     dst_crs=target_crs,
                     resampling=Resampling.bilinear,   # smoother than nearest for DEM
                 )
-
 
 def _compute_slope_aspect(dem_data: np.ndarray, xres: float, yres: float) -> Dict[str, np.ndarray]:
     """Compute slope (deg, rad, %) and aspect (deg, rad)."""
@@ -310,7 +440,7 @@ def _plot_raster_with_overlays(
             site_points.plot(ax=ax, color="red", markersize=22, marker="o")
             if annotate_ids:
                 for _i, _r in site_points.iterrows():
-                    sid = _r.get("id", _i)
+                    sid = _r.get("Site_id", _i)
                     geom = _r.geometry
                     x, y = (geom.x, geom.y) if geom.geom_type == "Point" else (geom.centroid.x, geom.centroid.y)
                     ax.annotate(str(sid), (x, y), xytext=(3, 3), textcoords="offset points",
@@ -465,6 +595,8 @@ def dem_and_terrain(
     DEM_url: Optional[str] = None,
     target_res_m: float = 30.0,
     stream_target_area_ha: float = 60.0,
+    catchment_crs: Optional[Union[int, str, dict]] = None,         # auto-tile if width/height exceed this
+    wcs_tile_cols_rows: Tuple[int, int] = (2, 2)  # tile grid (cols, rows), e.g. (2,2), (4,4)
 ) -> Tuple[str, str, str, str]:
     """
     End-to-end pipeline: acquire DEM (WCS or local), clip to catchment, reproject,
@@ -507,14 +639,20 @@ def dem_and_terrain(
     _ensure_dirs([catchment_folder, catch_datasets, catch_plots, topo_folder, sites_datasets, sites_plots])
 
     # --- Catchment layer & metadata store ---
-    gdf_catch = _read_catchment(Catchment_Shapefile_Path)
-    catch_gpkg = os.path.join(catch_datasets, f"{catchment_name} Data.gpkg")
-    gdf_catch.to_file(catch_gpkg, layer=f"{catchment_name} Data", driver="GPKG")
-
+    gdf_catch = _read_catchment(Catchment_Shapefile_Path, catchment_crs=catchment_crs)  # <— changed
     catch_crs = gdf_catch.crs
     if catch_crs is None:
+        # This should not happen now, but keep for safety.
         raise ValueError("Catchment file has no CRS. Please assign a projected CRS (metres).")
+        
+    try:
+        # If units are metres, area is m²; otherwise this will be arbitrary
+        gdf_catch["Area_ha"] = round(gdf_catch.geometry.area.values[0] / 10_000.0, 1)
+    except Exception:
+        gdf_catch["Area_ha"] = np.nan
 
+    catch_gpkg = os.path.join(catch_datasets, f"{catchment_name} Data.gpkg")
+    gdf_catch.to_file(catch_gpkg, layer=f"{catchment_name} Data", driver="GPKG")
     # --- DEM acquisition (local vs WCS) ---
     dem_temp = DEM_Input_Path if (DEM_Input_Path and os.path.exists(DEM_Input_Path)) else None
     downloaded = False
@@ -523,7 +661,8 @@ def dem_and_terrain(
             raise ValueError("No local DEM supplied and no DEM_url provided for WCS download.")
         print("Requesting DEM from WCS ...")
         dem_temp = os.path.join(topo_folder, "DEM_temp.tif")
-        _download_dem_wcs(DEM_url, _bbox_wgs84(gdf_catch), dem_temp)
+        _download_dem_wcs(DEM_url, _bbox_wgs84(gdf_catch), dem_temp,
+                          tile_cols_rows=wcs_tile_cols_rows)
         downloaded = True
         print(f"DEM downloaded: {dem_temp}")
     else:
@@ -631,7 +770,7 @@ def dem_and_terrain(
             sites_web = site_points_for_plots.to_crs(epsg=3857)
             sites_web.plot(ax=ax, color="red", markersize=40, marker="o", zorder=30)
             for i, r in sites_web.iterrows():
-                sid = r.get("id", i)
+                sid = r.get("Site_id", i)
                 ax.annotate(str(sid), (r.geometry.x, r.geometry.y),
                             xytext=(3, 3), textcoords="offset points",
                             fontsize=11, color="black", weight="bold")
@@ -652,6 +791,9 @@ def dem_and_terrain(
     dirmap = (64, 128, 1, 2, 4, 8, 16, 32)
     fdir = grid.flowdir(inflated, dirmap=dirmap)
     acc = grid.accumulation(fdir, dirmap=dirmap)
+    acc_f32 = np.where(np.isfinite(acc), acc.astype("float32"), np.nan)
+    acc_tif = os.path.join(topo_folder, "Flow_accumulation.tif")
+    _write_raster(acc_tif, acc_f32, dem_meta)
 
     # --- Per-site summaries & plots ---
     site_rows = []
@@ -663,12 +805,12 @@ def dem_and_terrain(
                 x_site = y_site = None
             else:
                 if row.geometry is None or row.geometry.is_empty:
-                    print(f"Skipping site {row.get('id', idx)}: empty geometry.")
+                    print(f"Skipping site {row.get('Site_id', idx)}: empty geometry.")
                     continue
                 x_site, y_site = row.geometry.x, row.geometry.y
                 combined_geom = _vectorized_catchment_for_point(grid, fdir, acc, dirmap, x_site, y_site, dem_transform)
                 if combined_geom is None:
-                    print(f"No delineated catchment for site {row.get('id', idx)}.")
+                    print(f"No delineated catchment for site {row.get('Site_id', idx)}.")
                     continue
 
             site_gdf = gpd.GeoDataFrame([attrs], geometry=[combined_geom], crs=dem_crs)
@@ -678,7 +820,7 @@ def dem_and_terrain(
             site_gdf["Area_m2"] = round(site_gdf.geometry.area.values[0], 0)
             site_gdf["Area_ha"] = round(site_gdf["Area_m2"] / 10_000.0, 1)
 
-            site_id = row.get("id", idx)
+            site_id = row.get("Site_id", idx)
             site_data_dir = os.path.join(sites_datasets, f"Site_{site_id}")
             site_plot_dir = os.path.join(sites_plots, f"Site_{site_id}")
             _ensure_dirs([site_data_dir, site_plot_dir])
@@ -786,13 +928,12 @@ def dem_and_terrain(
             print(f"Site {site_id} topographic data and plots saved.")
 
         except Exception as e:
-            print(f"Error processing site {row.get('id', idx)}: {e}")
+            print(f"Error processing site {row.get('Site_id', idx)}: {e}")
             continue
 
     # --- Combined outputs (same naming) ---
     all_gdf = gpd.GeoDataFrame(pd.concat(site_rows, ignore_index=True), crs=dem_crs)
-    all_sites_gpkg = os.path.join(sites_datasets, f"{catchment_name} Sites.gpkg")    
-    all_sites_gpkg_data = os.path.join(sites_datasets, f"{catchment_name} Sites Data.gpkg") 
+    all_sites_gpkg = os.path.join(sites_datasets, f"{catchment_name} Sites Data.gpkg")    
     all_sites_csv = os.path.join(sites_datasets, f"{catchment_name} Sites Data.csv")
 
     # Clean previous (and SQLite sidecars) then write fresh
@@ -804,8 +945,8 @@ def dem_and_terrain(
             pass
 
     all_gdf.to_file(all_sites_gpkg, layer=f"{catchment_name} Sites", driver="GPKG")
-    all_gdf.to_file(all_sites_gpkg_data, layer=f"{catchment_name} Sites", driver="GPKG")
-    #all_gdf.drop(columns="geometry").to_csv(all_sites_csv, index=False)
+    #all_gdf.to_file(all_sites_gpkg_data, layer=f"{catchment_name} Sites", driver="GPKG")
+    all_gdf.drop(columns="geometry").to_csv(all_sites_csv, index=False)
 
     # Remove downloaded temp DEM (never delete user-supplied DEM)
     if downloaded and dem_temp and os.path.exists(dem_temp):

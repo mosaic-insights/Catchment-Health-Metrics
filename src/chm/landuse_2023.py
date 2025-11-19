@@ -309,7 +309,7 @@ def landuse_2023(cfg: LanduseRiskConfig) -> Tuple[Path, Path]:
 
             for idx, row in sites_gdf.iterrows():
                 try:
-                    site_id = row.get("id", idx)
+                    site_id = row.get("Site_id", idx)
                     sgdf = gpd.GeoDataFrame([row.drop("geometry")], geometry=[row.geometry], crs=sites_gdf.crs)
                     plot_dir = sps / f"Site_{site_id}"; plot_dir.mkdir(parents=True, exist_ok=True)
 
@@ -378,7 +378,7 @@ def landuse_2023(cfg: LanduseRiskConfig) -> Tuple[Path, Path]:
                             plt.close()
 
                 except Exception as e:
-                    print(f"[site {row.get('id','NA')}] {e}")
+                    print(f"[site {row.get('Site_id','NA')}] {e}")
             """
             try:
                 if not updates_df.empty:
@@ -470,7 +470,7 @@ def landuse_2023(cfg: LanduseRiskConfig) -> Tuple[Path, Path]:
 
         for idx, row in sites_gdf.iterrows():
             try:
-                site_id = row.get("id", idx)
+                site_id = row.get("Site_id", idx)
                 sgdf = gpd.GeoDataFrame([row.drop("geometry")], geometry=[row.geometry], crs=sites_gdf.crs)
                 plot_dir = sps / f"Site_{site_id}"; plot_dir.mkdir(parents=True, exist_ok=True)
 
@@ -555,7 +555,7 @@ def landuse_2023(cfg: LanduseRiskConfig) -> Tuple[Path, Path]:
                         plt.close()
                 print(f"Site {site_id} is processed")
             except Exception as e:
-                print(f"[site {row.get('id','NA')}] {e}")
+                print(f"[site {row.get('Site_id','NA')}] {e}")
         """
         try:
             if not updates_df.empty:

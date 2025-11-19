@@ -15,6 +15,7 @@ import numpy as np
 import geopandas as gpd
 import rasterio as rio
 from rasterio.mask import mask as rio_mask
+from rasterio.warp import calculate_default_transform, reproject, Resampling
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
@@ -132,6 +133,47 @@ def _clip_and_pct(
     return out
 
 
+def _reproject_to_catchment_crs(
+    raster_path: Path,
+    catch_gdf: gpd.GeoDataFrame,
+) -> Path:
+    """
+    Reproject a clipped DEA raster to match the catchment CRS.
+    Uses nearest-neighbour to preserve class codes.
+    """
+    out_path = raster_path.with_name(raster_path.stem + "_catchCRS.tif")
+    if out_path.exists():
+        return out_path
+
+    dst_crs = catch_gdf.crs
+    if dst_crs is None:
+        raise ValueError("Catchment CRS is undefined.")
+
+    with rio.open(raster_path) as src:
+        transform, width, height = calculate_default_transform(
+            src.crs, dst_crs, src.width, src.height, *src.bounds
+        )
+        kwargs = src.meta.copy()
+        kwargs.update({
+            "crs": dst_crs,
+            "transform": transform,
+            "width": width,
+            "height": height,
+        })
+
+        with rio.open(out_path, "w", **kwargs) as dst:
+            reproject(
+                source=rio.band(src, 1),
+                destination=rio.band(dst, 1),
+                src_transform=src.transform,
+                src_crs=src.crs,
+                dst_transform=transform,
+                dst_crs=dst_crs,
+                resampling=Resampling.nearest,
+            )
+
+    return out_path
+
 def _plot_catchment_map(
     catchment_name: str,
     raster_path: Path,
@@ -141,29 +183,39 @@ def _plot_catchment_map(
     year: int,
     out_png: Path,
 ) -> None:
-    with rio.open(raster_path) as src:
+    # Reproject raster to match catchment CRS (so frame looks upright)
+    reproj_tif = _reproject_to_catchment_crs(raster_path, gdf_catch)
+
+    with rio.open(reproj_tif) as src:
         arr = src.read(1)
         nd = src.nodata if src.nodata is not None else 255
         bounds, crs = src.bounds, src.crs
 
-    present_vals = [int(v) for v in np.unique(arr) if int(v) in code_to_label and int(v) != nd]
+    # Find only the land-cover classes we care about
+    present_vals = [
+        int(v) for v in np.unique(arr)
+        if int(v) in code_to_label and int(v) != nd
+    ]
     if not present_vals:
         return
 
     present_vals.sort()
     code_to_idx = {v: i for i, v in enumerate(present_vals)}
     idx = np.full(arr.shape, -1, dtype=np.int32)
+
     colors, labels = [], []
     for v in present_vals:
         idx[arr == v] = code_to_idx[v]
         colors.append(code_to_color.get(v, "#bbbbbb"))
         labels.append(f"{v} – {code_to_label[v]}")
+
     idx_ma = np.ma.masked_equal(idx, -1)
     cmap = ListedColormap(colors)
 
-    gdf_plot = gdf_catch.to_crs(crs)
+    # Catchment is already in this CRS
+    gdf_plot = gdf_catch
 
-    fig, ax = plt.subplots(figsize=(9, 6))
+    fig, ax = plt.subplots(figsize=(6, 6))
     ax.imshow(
         idx_ma,
         extent=[bounds.left, bounds.right, bounds.bottom, bounds.top],
@@ -171,24 +223,38 @@ def _plot_catchment_map(
         interpolation="nearest",
         origin="upper",
     )
-    gdf_plot.boundary.plot(ax=ax, edgecolor="black", facecolor="none", linewidth=1.3)
+    gdf_plot.boundary.plot(
+        ax=ax, edgecolor="black", facecolor="none", linewidth=1.3
+    )
 
-    legend_patches = [Patch(facecolor=colors[i], edgecolor="black", label=labels[i]) for i in range(len(labels))]
+    legend_patches = [
+        Patch(facecolor=colors[i], edgecolor="black", label=labels[i])
+        for i in range(len(labels))
+    ]
     ax.legend(
         handles=legend_patches,
         loc="upper left",
-        fontsize=7, frameon=False,
+        fontsize=7,
+        frameon=False,
     )
-    ax.set_title(f"{catchment_name} – DEA Land Cover ({year})", fontsize=11, fontweight="bold")
-    ax.set_xlabel("Longitude", fontsize=10, fontweight="bold")
-    ax.set_ylabel("Latitude", fontsize=10, fontweight="bold")
+
+    ax.set_title(
+        f"{catchment_name} – DEA Land Cover ({year})",
+        fontsize=11,
+        fontweight="bold",
+    )
+    ax.set_xlabel("Easting (m)", fontsize=10, fontweight="bold")
+    ax.set_ylabel("Northing (m)", fontsize=10, fontweight="bold")
+
     ax.tick_params(axis="both", labelsize=10)
     ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
     ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
     ax.grid(True, linestyle="--", alpha=0.5)
+
     plt.tight_layout()
     plt.savefig(out_png, dpi=300, bbox_inches="tight")
     plt.close()
+
 
 def _plot_timeseries(
     df_pct: pd.DataFrame,
@@ -354,7 +420,7 @@ def dea_landuse_change(cfg: DEALanduseConfig) -> Tuple[Path, Path]:
         if sites_gdf is not None and len(sites_gdf) > 0:
             print("Computing site class percentages + time series...")
             for _, row in sites_gdf.iterrows():
-                site_id = row.get("id", None)
+                site_id = row.get("Site_id", None)
                 sgdf = gpd.GeoDataFrame([row.drop(labels=["geometry"])], geometry=[row.geometry], crs=sites_gdf.crs)
 
                 series: List[Dict[int, float]] = []

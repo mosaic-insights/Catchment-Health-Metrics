@@ -189,7 +189,7 @@ def hydroclimate_projections(cfg: AwralProjConfig) -> Tuple[str, str]:
 
     # ---- accumulators ----
     catch_merged: Optional[pd.DataFrame] = None
-    site_frames: Dict[str, pd.DataFrame] = {str(row.get("id")): pd.DataFrame()
+    site_frames: Dict[str, pd.DataFrame] = {str(row.get("Site_id")): pd.DataFrame()
                                             for _, row in (sites.iterrows() if sites is not None else [])}
 
     # ========== main loops ==========
@@ -245,7 +245,7 @@ def hydroclimate_projections(cfg: AwralProjConfig) -> Tuple[str, str]:
             # ---------- B) Site daily mean (optional) ----------
             if cfg.make_site_csvs and sites is not None:
                 for _, row in sites.iterrows():
-                    sid = str(row.get("id"))
+                    sid = str(row.get("Site_id"))
                     try:
                         daily_site = _safe_mean_clip(da, mapping(row.geometry), (row.geometry.centroid.x, row.geometry.centroid.y))
                         df_s = daily_site.to_dataframe(name=f"{pretty} - {proj_name}").reset_index()
