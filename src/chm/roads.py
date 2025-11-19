@@ -210,7 +210,7 @@ def national_roads(cfg: RoadsConfig) -> Tuple[str, str]:
     # Per-site
     for i, site in sites.iterrows():
         try:
-            sid = site.get("id", i)
+            sid = site.get("Site_id", i)
             site_gdf = gpd.GeoDataFrame(geometry=[site.geometry], crs=sites.crs)
             site_dir = os.path.join(sites_ds, f"Site_{sid}")
             plot_dir = os.path.join(plots_ds, f"Site_{sid}")
@@ -329,7 +329,7 @@ def national_roads(cfg: RoadsConfig) -> Tuple[str, str]:
                 plt.close()
             print(f"Site {sid} is processed")
         except Exception as e:
-            print(f"[WARN] Site {site.get('id', i)} failed: {e}")
+            print(f"[WARN] Site {site.get('Site_id', i)} failed: {e}")
     """
     # Write back amended sites GPKG
     try:

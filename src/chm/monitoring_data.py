@@ -50,7 +50,7 @@ class MonitoringConfig:
     auto_detect_all_numeric: bool = True      # then include other numeric columns
     auto_detect_exclude: List[str] = field(default_factory=lambda: [
         "east", "easting", "north", "northing", "lon", "longitude", "lat", "latitude",
-        "x", "y", "geometry", "site_id", "id", "station", "name"
+        "x", "y", "geometry", "Site_id", "id", "station", "name"
     ])
 
     # thresholds: mapping variable -> callable(mean) or literal; fallback uses default_other_rule
@@ -93,7 +93,7 @@ def _read_sites_gpkg(base_sites: Path, catchment_name: str) -> gpd.GeoDataFrame:
     if not gpkg.exists():
         raise FileNotFoundError(f"Sites GPKG not found: {gpkg}")
     gdf = gpd.read_file(gpkg)
-    if "id" not in gdf.columns:
+    if "Site_id" not in gdf.columns:
         raise ValueError("Sites GPKG must have an 'id' column.")
     return gdf
 
@@ -307,7 +307,7 @@ def monitoring_data(cfg: MonitoringConfig) -> Path:
     combined_summaries: List[pd.DataFrame] = []
 
     for _, row in sites_gdf.iterrows():
-        site_id = row["id"]
+        site_id = row["Site_id"]
         folder_name = f"Site_{site_id}"
         site_folder = sites_ds / folder_name
         site_folder.mkdir(parents=True, exist_ok=True)

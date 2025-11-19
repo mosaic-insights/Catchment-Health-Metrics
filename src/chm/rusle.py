@@ -55,6 +55,7 @@ class RusleConfig:
     p_factor_path: str
     r_factor_path: str
     buffer_km: float = 10.0
+    catchment_crs: Optional[str] = None
 
 
 # =============== small helpers ===============
@@ -74,14 +75,32 @@ def _read_dem(catch_datasets: str) -> Tuple[str, rio.Affine, float, float]:
     return dem_path, transform, xres, yres
 
 
-def _bbox_buffered_in_raster_crs(vector_path: str, raster_path: str, buffer_km: float) -> Tuple[float, float, float, float]:
+def _bbox_buffered_in_raster_crs(
+    vector_path: str,
+    raster_path: str,
+    buffer_km: float,
+    *,
+    catchment_crs: Optional[str] = None,  # <-- NEW (keyword-only)
+) -> Tuple[float, float, float, float]:
     gdf = gpd.read_file(vector_path)
+
+    # If a user-specified CRS is provided, respect it:
+    # - If the file has no CRS, assign it.
+    # - If the file has a CRS and it differs, reproject first.
+    if catchment_crs:
+        if gdf.crs is None:
+            gdf = gdf.set_crs(catchment_crs)
+        elif str(gdf.crs).upper() != str(catchment_crs).upper():
+            gdf = gdf.to_crs(catchment_crs)
+
     with rio.open(raster_path) as src:
         r_crs = src.crs
+
+    # Work in the raster CRS for a correct bounding box in raster space
     gdf_r = gdf.to_crs(r_crs)
     minx, miny, maxx, maxy = gdf_r.total_bounds
 
-    # approx degrees per km (adequate for small buffers and non-polar AOIs)
+    # Approx degrees per km (good enough for small buffers & non-polar AOIs)
     deg = buffer_km / 111.0
     return (minx - deg, miny - deg, maxx + deg, maxy + deg)
 
@@ -204,7 +223,10 @@ def rusle_and_sdr_rusle(cfg: RusleConfig) -> Tuple[str, str]:
     for src, out in [(cfg.k_factor_path, tmp_k_clip),
                      (cfg.p_factor_path, tmp_p_clip),
                      (cfg.r_factor_path, tmp_r_clip)]:
-        bbox = _bbox_buffered_in_raster_crs(cfg.catchment_path, src, cfg.buffer_km)
+        bbox = _bbox_buffered_in_raster_crs(
+            cfg.catchment_path, src, cfg.buffer_km,
+            catchment_crs=cfg.catchment_crs,  # <-- NEW
+        )
         _clip_by_bbox(src, out, bbox)
 
     k_factor = os.path.join(rusle_folder, "k_factor.tif")
@@ -240,8 +262,26 @@ def rusle_and_sdr_rusle(cfg: RusleConfig) -> Tuple[str, str]:
     dem_xr = rxr.open_rasterio(dem_path, masked=True).squeeze(drop=True)
     tform, height, width = dem_xr.rio.transform(), dem_xr.rio.height, dem_xr.rio.width
 
-    sites_gdf = gpd.read_file(all_sites_gpkg).to_crs(dem_xr.rio.crs)
-    catch_gdf = gpd.read_file(cfg.catchment_path).to_crs(dem_xr.rio.crs)
+    # Sites (combined GPKG from prior modules)
+    sites_gdf = gpd.read_file(all_sites_gpkg)
+    if cfg.catchment_crs:
+        # If the layer lacks a CRS, assign; otherwise reproject if different
+        if sites_gdf.crs is None:
+            sites_gdf = sites_gdf.set_crs(cfg.catchment_crs)
+        elif str(sites_gdf.crs).upper() != str(cfg.catchment_crs).upper():
+            sites_gdf = sites_gdf.to_crs(cfg.catchment_crs)
+    # Finally, cast to DEM CRS for raster alignment
+    sites_gdf = sites_gdf.to_crs(dem_xr.rio.crs)
+    
+    # Catchment boundary
+    catch_gdf = gpd.read_file(cfg.catchment_path)
+    if cfg.catchment_crs:
+        if catch_gdf.crs is None:
+            catch_gdf = catch_gdf.set_crs(cfg.catchment_crs)
+        elif str(catch_gdf.crs).upper() != str(cfg.catchment_crs).upper():
+            catch_gdf = catch_gdf.to_crs(cfg.catchment_crs)
+    catch_gdf = catch_gdf.to_crs(dem_xr.rio.crs)
+
     catch_union = catch_gdf.unary_union
     catch_mask = geometry_mask([mapping(catch_union)], (height, width), tform, invert=True)
 
@@ -251,7 +291,7 @@ def rusle_and_sdr_rusle(cfg: RusleConfig) -> Tuple[str, str]:
         print("[WARN] No annual C or SDR rasters found. Nothing to compute.")
         return all_sites_gpkg, sites_datasets
 
-    site_tables: Dict[object, List[dict]] = {row["id"]: [] for _, row in sites_gdf.iterrows()}
+    site_tables: Dict[object, List[dict]] = {row["Site_id"]: [] for _, row in sites_gdf.iterrows()}
     catch_rows: List[dict] = []
     site_gpkg_rows: List[dict] = []
 
@@ -302,7 +342,7 @@ def rusle_and_sdr_rusle(cfg: RusleConfig) -> Tuple[str, str]:
 
         # per-site stats + (DEACTIVATED writes later; we still compute CSVs/plots)
         for _, site in sites_gdf.iterrows():
-            site_id = site.get("id")
+            site_id = site.get("Site_id")
             geom = site.geometry
             mask_np = geometry_mask([mapping(geom)], (height, width), tform, invert=True)
             valid_s = mask_np & np.isfinite(rusle_year)

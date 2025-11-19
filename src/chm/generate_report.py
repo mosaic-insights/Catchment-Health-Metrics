@@ -257,6 +257,8 @@ def _compute_spi_sri_from_daily(
 ) -> Tuple[Optional[Path], Optional[Path]]:
     plots = base / cfg.catch_plots_dir
     datasets = base / cfg.catch_datasets_dir
+    hydro = datasets / "Hydroclimate"
+    hist_dir = hydro / "Historical data"
     _ensure_dirs([plots, datasets])
 
     spi_png = plots / cfg.spi12_png.format(catchment=catchment_name)
@@ -281,10 +283,10 @@ def _compute_spi_sri_from_daily(
             )
             spi_col = spi12.columns[2]
             spi12 = spi12.rename(columns={spi_col: "SPI12"})
-            spi12.to_csv(datasets / cfg.spi12_monthly_csv.format(catchment=catchment_name), index=False)
+            spi12.to_csv(hydro / cfg.spi12_monthly_csv.format(catchment=catchment_name), index=False)
             spi12["Year"] = spi12["Datetime"].dt.year
             spi_year = spi12.groupby("Year", as_index=False)["SPI12"].mean()
-            spi_year.to_csv(datasets / cfg.spi12_annual_csv.format(catchment=catchment_name), index=False)
+            spi_year.to_csv(hydro / cfg.spi12_annual_csv.format(catchment=catchment_name), index=False)
             _plot_spi_bar(
                 spi_year, "SPI12",
                 f"{catchment_name} – SPI12 (Precipitation)", "SPI12",
@@ -305,10 +307,10 @@ def _compute_spi_sri_from_daily(
             )
             sri_col = sri12.columns[2]
             sri12 = sri12.rename(columns={sri_col: "SRI12"})
-            sri12.to_csv(datasets / cfg.sri12_monthly_csv.format(catchment=catchment_name), index=False)
+            sri12.to_csv(hydro / cfg.sri12_monthly_csv.format(catchment=catchment_name), index=False)
             sri12["Year"] = sri12["Datetime"].dt.year
             sri_year = sri12.groupby("Year", as_index=False)["SRI12"].mean()
-            sri_year.to_csv(datasets / cfg.sri12_annual_csv.format(catchment=catchment_name), index=False)
+            sri_year.to_csv(hydro / cfg.sri12_annual_csv.format(catchment=catchment_name), index=False)
             _plot_spi_bar(
                 sri_year, "SRI12",
                 f"{catchment_name} – SRI12 (Runoff)", "SRI12",
@@ -459,28 +461,41 @@ def _compose_dea_two_panel(cfg: ReportConfig, catchment_name: str, catch_plots: 
         img1 = imread(str(p_first))
         img2 = imread(str(p_last))
 
-        # One row, two columns — TIGHTER SPACING
+        # One row, two columns – tighter and simpler
         fig, axes = plt.subplots(
-            nrows=1, ncols=2, figsize=(11.0, 5.6),  # slightly narrower
+            nrows=1,
+            ncols=2,
+            figsize=(10.0, 5.4),
             constrained_layout=False,
-            gridspec_kw={"wspace": 0.01}           # <<< key change
         )
 
+        # --- Left / right panels ---
         panels = [(axes[0], img1, y_first), (axes[1], img2, y_last)]
         for ax, img, y in panels:
             ax.imshow(img)
-            ax.set_title(f"DEA Land Cover {y}", fontsize=11, fontweight="bold", pad=3)  # <<< smaller pad
+            # one clear title per image
+            #ax.set_title(f"DEA Land Cover {y}",fontsize=11,fontweight="bold",pad=2,)
             ax.axis("off")
-            ax.tick_params(axis="both", labelsize=10)
             ax.margins(x=0, y=0)
 
-        # Slightly lower suptitle + trimmed margins
-        fig.suptitle(f"{catchment_name} – DEA Land Cover", fontsize=12, fontweight="bold", y=0.95)
-        fig.subplots_adjust(left=0.02, right=0.995, bottom=0.05, top=0.89, wspace=0.01)  # <<< tighter
+        # If you want ONLY per-panel titles, comment this out:
+        # fig.suptitle(f"{catchment_name} – DEA Land Cover",
+        #              fontsize=12, fontweight="bold", y=0.97)
+
+        # Tight margins + very small horizontal gap
+        fig.subplots_adjust(
+            left=0.02,
+            right=0.99,
+            bottom=0.03,
+            top=0.92,   # leave room only for per-panel titles
+            wspace=0.001 # controls space between panels
+        )
+
         out_path = catch_plots / cfg.dea_two_panel_name.format(catchment=catchment_name)
-        fig.savefig(out_path, dpi=cfg.default_dpi, bbox_inches="tight", pad_inches=0.08)
+        fig.savefig(out_path, dpi=cfg.default_dpi, bbox_inches="tight", pad_inches=0.03)
         plt.close(fig)
         return out_path
+
     except Exception as e:
         print(f"[WARN] Could not compose DEA two-panel: {e}")
         return None
@@ -639,30 +654,44 @@ def _compose_riparian_two_panel(cfg: ReportConfig, catchment_name: str, catch_pl
         img1 = imread(str(p_first))
         img2 = imread(str(p_last))
 
-        # One row, two columns — TIGHTER SPACING
         fig, axes = plt.subplots(
-            nrows=1, ncols=2, figsize=(11.0, 5.6),
+            nrows=1,
+            ncols=2,
+            figsize=(10.0, 5.4),
             constrained_layout=False,
-            gridspec_kw={"wspace": 0.01}           # <<< key change
         )
 
         panels = [(axes[0], img1, y_first), (axes[1], img2, y_last)]
         for ax, img, y in panels:
             ax.imshow(img)
-            ax.set_title(f"Riparian NDVI by Stream Segment {y}", fontsize=11, fontweight="bold", pad=3)  # <<< smaller pad
+            #ax.set_title(f"Riparian NDVI by Stream Segment {y}",fontsize=11,fontweight="bold",pad=2,)
             ax.axis("off")
-            ax.tick_params(axis="both", labelsize=10)
             ax.margins(x=0, y=0)
 
-        fig.suptitle(f"{catchment_name} – Riparian NDVI by Stream Segment", fontsize=12, fontweight="bold", y=0.95)
-        fig.subplots_adjust(left=0.02, right=0.995, bottom=0.05, top=0.89, wspace=0.01)  # <<< tighter
+        # Again: comment this out if you *only* want per-panel titles
+        # fig.suptitle(
+        #     f"{catchment_name} – Riparian NDVI by Stream Segment",
+        #     fontsize=12,
+        #     fontweight="bold",
+        #     y=0.97,
+        # )
+
+        fig.subplots_adjust(
+            left=0.02,
+            right=0.99,
+            bottom=0.03,
+            top=0.92,
+            wspace=0.001,
+        )
+
         out_path = catch_plots / f"{catchment_name}_Riparian_NDVI_StreamSegment_FirstLast.png"
-        fig.savefig(out_path, dpi=cfg.default_dpi, bbox_inches="tight", pad_inches=0.08)
+        fig.savefig(out_path, dpi=cfg.default_dpi, bbox_inches="tight", pad_inches=0.03)
         plt.close(fig)
         return out_path
     except Exception as e:
         print(f"[WARN] Could not compose Riparian NDVI two-panel: {e}")
         return None
+
 
 # ===================== NEW: Site-level hydroclimate/SPI/SRI helpers =====================
 def _load_site_daily(base: Path, cfg: ReportConfig, site_id: int) -> Tuple[pd.DataFrame, str]:
@@ -900,7 +929,7 @@ def _site_location_map(
             return None
 
         # ---- 1) Build a GeoDataFrame for the single site geometry with the provided CRS
-        site_gdf = gpd.GeoDataFrame({"id": [sid]}, geometry=[site_geom], crs=sites_crs)
+        site_gdf = gpd.GeoDataFrame({"Site_id": [sid]}, geometry=[site_geom], crs=sites_crs)
 
         # ---- 2) Align CRS to the catchment's CRS (if both known)
         if catch_gdf is not None and catch_gdf.crs is not None:
@@ -1137,7 +1166,7 @@ def build_report(cfg: ReportConfig) -> Path:
     # 6) Sites section (enhanced with Site-level hydroclimate, summary, SPI, SRI)
     doc.add_heading("Sites", level=1)
 
-    site_ids: List[int] = []
+    site_ids: List[str] = []
     gpkg_candidates = [sites_datasets / cfg.all_sites_gpkg_name.format(catchment=catchment_name),
                        sites_datasets / f"{catchment_name} Sites Data.gpkg",
                        sites_datasets / "All Sites Data.gpkg",]
@@ -1146,25 +1175,24 @@ def build_report(cfg: ReportConfig) -> Path:
     if gpkg_path and gpkg_path.exists():
         try:
             sites_gdf = gpd.read_file(gpkg_path)
-            if "id" in sites_gdf.columns:
-                site_ids = list(pd.to_numeric(sites_gdf["id"], errors="coerce").dropna().astype(int).unique())
+            if "Site_id" in sites_gdf.columns:
+                # keep raw IDs as strings (works for 1, 2, 3 and DNE6, E601, ...)
+                site_ids = sorted({str(v) for v in sites_gdf["Site_id"].dropna().unique()})
         except Exception as e:
             print(f"[WARN] could not read sites GPKG: {e}")
 
     if not site_ids and sites_plots.exists():
         for p in (p for p in sites_plots.iterdir() if p.is_dir()):
             if p.name.startswith("Site_"):
-                try:
-                    site_ids.append(int(p.name.replace("Site_", "")))
-                except Exception:
-                    pass
+                site_ids.append(p.name.replace("Site_", ""))
+    
     site_ids = sorted(set(site_ids))
 
     for sid in site_ids:
         doc.add_heading(f"Site {sid}", level=2)
         # --- First figure for each site: location map (site polygon over catchment) ---
-        if catch_gdf is not None and sites_gdf is not None and not sites_gdf.empty and ("id" in sites_gdf.columns):
-            row_match = sites_gdf[pd.to_numeric(sites_gdf["id"], errors="coerce") == sid]
+        if catch_gdf is not None and sites_gdf is not None and not sites_gdf.empty and ("Site_id" in sites_gdf.columns):
+            row_match = sites_gdf[sites_gdf["Site_id"].astype(str) == str(sid)]
             if not row_match.empty:
                 site_row = row_match.iloc[0]
                 # Pass the geometry AND the CRS of the sites layer (sites_gdf.crs). Geometry itself has no CRS.
@@ -1223,8 +1251,8 @@ def build_report(cfg: ReportConfig) -> Path:
                 doc.add_paragraph(f"[Could not add monitoring summary table for Site {sid}: {e}]")
 
         # land/erosion panel & summary
-        if sites_gdf is not None and not sites_gdf.empty and ("id" in sites_gdf.columns):
-            row_match = sites_gdf[pd.to_numeric(sites_gdf["id"], errors="coerce") == sid]
+        if sites_gdf is not None and not sites_gdf.empty and ("Site_id" in sites_gdf.columns):
+            row_match = sites_gdf[pd.to_numeric(sites_gdf["Site_id"], errors="coerce") == sid]
             if not row_match.empty:
                 row = row_match.iloc[0]
                 le_png = _site_le_panel(cfg, row, sid, site_plot_dir)

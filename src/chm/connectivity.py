@@ -55,13 +55,11 @@ class ConnectivityConfig:
     chm_workspace: str
     catchment_path: str
     sites_path: str
-
+    catchment_crs: Optional[str] = None
     sdr_max: float = 0.8
     ic0: float = 0.5
     k: float = 1.0
-
     stream_area_threshold_m2: float = 1.3e4  # ≈ 13,000 m²
-
 
 # ============================ Small helpers ============================
 
@@ -182,6 +180,7 @@ def process_surface_and_groundwater_connectivity(
     Catchment_Shapefile_Path: str,
     Sites_Shapefile_Path: str,
     *,
+    catchment_crs: Optional[str] = None, 
     sdr_max: float = 0.8,
     ic0: float = 0.5,
     k: float = 1.0,
@@ -213,7 +212,28 @@ def process_surface_and_groundwater_connectivity(
     catch_gpkg = os.path.join(catch_datasets, f"{catchment_name} Data.gpkg")
     all_sites_gpkg = os.path.join(sites_datasets, f"{catchment_name} Sites Data.gpkg")
     annual_c_dir = os.path.join(catch_datasets, "Vegetation", "Indices", "C Factor", "Annual")
+    
+    # -------- Apply user CRS to catchment & sites --------
+    try:
+        _catch_gdf = gpd.read_file(Catchment_Shapefile_Path)
+        if catchment_crs:
+            if _catch_gdf.crs is None:
+                _catch_gdf = _catch_gdf.set_crs(catchment_crs)
+            elif str(_catch_gdf.crs).upper() != str(catchment_crs).upper():
+                _catch_gdf = _catch_gdf.to_crs(catchment_crs)
+    except Exception:
+        _catch_gdf = None  # Not strictly required by this module; proceed regardless.
 
+    try:
+        _sites_gdf_user = gpd.read_file(Sites_Shapefile_Path)
+        if catchment_crs:
+            if _sites_gdf_user.crs is None:
+                _sites_gdf_user = _sites_gdf_user.set_crs(catchment_crs)
+            elif str(_sites_gdf_user.crs).upper() != str(catchment_crs).upper():
+                _sites_gdf_user = _sites_gdf_user.to_crs(catchment_crs)
+    except Exception:
+        _sites_gdf_user = None
+        
     # -------- DEM & basic derivatives --------
     dem, dem_meta, transform, xres, yres, dem_nodata, dem_crs = _read_dem(catch_datasets)
     pixel_area = xres * yres
@@ -395,11 +415,22 @@ def process_surface_and_groundwater_connectivity(
             print(f"[WARN] Could not read sites GPKG: {e}")
             continue
 
+        # Prefer the already projected sites (if loaded above); otherwise read raw
         sites_pts = None
-        try:
-            sites_pts = gpd.read_file(Sites_Shapefile_Path)
-        except Exception:
-            pass  # optional overlay for full-raster plots
+        if _sites_gdf_user is not None:
+            sites_pts = _sites_gdf_user.copy()
+        else:
+            try:
+                sites_pts = gpd.read_file(Sites_Shapefile_Path)
+                # If user provided a CRS, ensure we’re in that CRS first (then we’ll cast to the raster’s CRS below)
+                if catchment_crs:
+                    if sites_pts.crs is None:
+                        sites_pts = sites_pts.set_crs(catchment_crs)
+                    elif str(sites_pts.crs).upper() != str(catchment_crs).upper():
+                        sites_pts = sites_pts.to_crs(catchment_crs)
+            except Exception:
+                pass  # optional overlay for full-raster plots
+
 
         raster_files = [
             TWI_path,
@@ -408,7 +439,7 @@ def process_surface_and_groundwater_connectivity(
 
         for idx, row in sites_gdf.iterrows():
             try:
-                site_id = row.get("id", idx)
+                site_id = row.get("Site_id", idx)
                 geom = row.geometry
                 site_attrs = row.drop(labels="geometry").to_dict()
                 site_gdf = gpd.GeoDataFrame([site_attrs], geometry=[geom], crs=sites_gdf.crs)
@@ -439,9 +470,9 @@ def process_surface_and_groundwater_connectivity(
                             if pts.crs != src.crs:
                                 pts = pts.to_crs(src.crs)
                             pts.plot(ax=ax, color="red", markersize=15)
-                            if "id" in pts.columns:
+                            if "Site_id" in pts.columns:
                                 for _, pr in pts.iterrows():
-                                    ax.annotate(f"Site {pr['id']}",
+                                    ax.annotate(f"Site {pr['Site_id']}",
                                                 (pr.geometry.x, pr.geometry.y),
                                                 xytext=(3, 3), textcoords="offset points",
                                                 fontsize=7, color="red")
@@ -496,7 +527,7 @@ def process_surface_and_groundwater_connectivity(
                         # =======================================================================
 
             except Exception as e:
-                print(f"[WARN] Error processing site {row.get('id', idx)}: {e}")
+                print(f"[WARN] Error processing site {row.get('Site_id', idx)}: {e}")
                 continue
 
         # === Write-back like roads_hist.py: replace the SAME layer, not the whole file ===
@@ -583,7 +614,7 @@ def ndvi_cumulative_risk_profiles(CHM_Work_Space: str, Catchment_Shapefile_Path:
         return float(np.trapz(y_in, x_in))  # raw AUC
 
     for i, row in sites_gdf.iterrows():
-        site_id = row.get("id", i)
+        site_id = row.get("Site_id", i)
         geom = row.geometry
         site_plot_dir = os.path.join(sites_plots, f"Site_{site_id}")
         os.makedirs(site_plot_dir, exist_ok=True)
@@ -692,6 +723,7 @@ def surface_ground_water_connectivity(
     Catchment_Shapefile_Path: str,
     Sites_Shapefile_Path: str,
     *,
+    catchment_crs: Optional[str] = None,
     sdr_max: float = 0.8,
     ic0: float = 0.5,
     k: float = 1.0,
@@ -706,6 +738,7 @@ def surface_ground_water_connectivity(
         CHM_Work_Space=CHM_Work_Space,
         Catchment_Shapefile_Path=Catchment_Shapefile_Path,
         Sites_Shapefile_Path=Sites_Shapefile_Path,
+        catchment_crs=catchment_crs,
         sdr_max=sdr_max,
         ic0=ic0,
         k=k,

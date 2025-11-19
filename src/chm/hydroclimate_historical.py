@@ -526,7 +526,7 @@ def hydroclimate_historical(cfg: HistoricalConfig) -> str:
 
                 # iterate sites
                 for idx, site in sites_gdf.iterrows():
-                    sid = site.get("id") or site.get("site_id") or site.get("Site_ID") or idx
+                    sid = site.get("Site_id") or site.get("site_id") or site.get("Site_ID") or idx
                     geom_list = [site.geometry]
                     site_folder = os.path.join(sites_plots, f"Site_{sid}")
                     _ensure_dirs([site_folder])

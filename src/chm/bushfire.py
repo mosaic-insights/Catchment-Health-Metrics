@@ -291,7 +291,7 @@ def historical_bushfire(cfg: BushfireConfig) -> Tuple[str, str]:
     # ================= per-site processing =================
     for idx, site in sites.iterrows():
         try:
-            sid = site.get("id", idx)
+            sid = site.get("Site_id", idx)
             site_geom = gpd.GeoDataFrame(geometry=[site.geometry], crs=sites.crs)
 
             site_dir = os.path.join(sites_datasets, f"Site_{sid}")
@@ -454,7 +454,7 @@ def historical_bushfire(cfg: BushfireConfig) -> Tuple[str, str]:
                 plt.close()
             print(f"Site {sid} is processed")
         except Exception as e:
-            print(f"[WARN] Site {site.get('id', idx)} failed: {e}")
+            print(f"[WARN] Site {site.get('Site_id', idx)} failed: {e}")
     """
     # ---- write back amended sites GPKG (AUC columns) ----
     try:
