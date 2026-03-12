@@ -15,8 +15,8 @@ pyproj>=3.6
 affine>=2.4
 
 # === STAC / remote sensing ===
-pystac-client>=0.7    # import name: pystac_client
-odc-stac>=0.3         # import name: odc.stac
+pystac-client>=0.7
+odc-stac>=0.3
 
 # === Hydro tools ===
 pysheds>=0.3
@@ -24,7 +24,11 @@ pysheds>=0.3
 # === IO / utilities ===
 requests>=2.31
 
-# === DEA tools (optional; heavy) ===
-# dea-tools>=0.3      # import name: dea_tools
-# NOTE: dea-tools may require system deps (e.g., GDAL stack). Consider leaving it optional.
+# === CLI / config ===
+typer>=0.12.3
+pydantic>=2.5
+pyyaml>=6.0
 
+# === DEA tools (optional; heavy) ===
+# dea-tools>=0.3
+# NOTE: dea-tools may require system deps (e.g., GDAL stack).

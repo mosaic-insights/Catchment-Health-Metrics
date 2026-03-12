@@ -385,9 +385,34 @@ def process_surface_and_groundwater_connectivity(
         Dup = np.where(np.isnan(dem), np.nan, Dup)
 
         # ---- Connectivity index & SDR ----
-        Ddn_safe = np.where(Ddn == 0, np.nan, Ddn)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            IC = np.log10(Dup / Ddn_safe)
+        #Ddn_safe = np.where(Ddn == 0, np.nan, Ddn)
+        #with np.errstate(divide="ignore", invalid="ignore"):
+            #IC = np.log10(Dup / Ddn_safe)
+        #IC = np.where(np.isfinite(IC), IC, np.nan)
+
+        # Build an explicit null mask once (more reliable than np.isnan(dem) alone)
+        # - dem may not have NaNs everywhere outside catchment if nodata is not NaN
+        null_mask = np.isnan(dem)
+
+        # 1) Mask outside-catchment / nodata early
+        Dup = Dup.astype("float32", copy=False)
+        Ddn = Ddn.astype("float32", copy=False)
+
+        Dup[null_mask] = np.nan
+        Ddn[null_mask] = np.nan
+
+        # 2) Numerical safety: enforce lower bounds (prevents inf and extreme IC)
+        EPS_DDN = 1.0   # same idea as your second snippet; tune if you want (e.g., 0.001)
+        EPS_DUP = 1e-6  # small >0 to avoid log10(0) -> -inf (keep tiny)
+
+        Ddn_safe = np.where(np.isfinite(Ddn) & (Ddn > 0), Ddn, EPS_DDN)
+        Dup_safe = np.where(np.isfinite(Dup) & (Dup > 0), Dup, EPS_DUP)
+
+        # 3) Now log10 is safe WITHOUT np.errstate
+        IC = np.log10(Dup_safe / Ddn_safe)
+
+        # 4) Re-apply spatial mask and clean any remaining weirdness
+        IC[null_mask] = np.nan
         IC = np.where(np.isfinite(IC), IC, np.nan)
 
         SDR = float(sdr_max) / (1.0 + np.exp((float(ic0) - IC) / float(k)))
