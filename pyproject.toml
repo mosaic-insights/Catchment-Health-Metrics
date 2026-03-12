@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "catchment-health-metrics"
 version = "0.1.0"
-description = "Catchment Health Metrics: functions-only modules (DEM/topo, veg, connectivity, RUSLE, hydroclimate, risk)"
+description = "Catchment Health Metrics: Python tools for terrain, vegetation, connectivity, erosion, hydroclimate, and risk analysis"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"
 license = { text = "MIT License" }
@@ -16,7 +16,7 @@ classifiers = [
   "Environment :: Console",
   "Intended Audience :: Developers",
   "Intended Audience :: Science/Research",
-  "License :: OSI Approved :: ISC License (ISCL)",
+  "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Topic :: Scientific/Engineering",
@@ -32,6 +32,7 @@ dependencies = [
   "geopandas>=0.14",
   "shapely>=2.0",
   "pyproj>=3.6",
+  "affine>=2.4",
   "tqdm>=4.66",
   "requests>=2.31",
   "typer>=0.12.3",
@@ -48,7 +49,7 @@ dependencies = [
 dev = ["pytest>=7.4", "pytest-cov>=4.1", "pre-commit>=3.6", "ruff>=0.5.1"]
 
 [project.urls]
-Homepage = "https://github.com/mosaic-insights/Catchment_Health_Metrics"
+Homepage = "https://github.com/mosaic-insights/Catchment-Health-Metrics"
 
 # Console script: requires src/chm/cli.py defining `app = typer.Typer()`
 [project.scripts]
@@ -60,7 +61,6 @@ packages = [{ include = "chm", from = "src" }]
 [tool.hatch.build.targets.wheel.force-include]
 "src/chm/py.typed" = "chm/py.typed"
 
-packages = ["src/chm"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/**", "README.md", "LICENSE", "pyproject.toml"]
