@@ -42,7 +42,8 @@ dependencies = [
   "matplotlib>=3.8",
   "scipy>=1.11",
   "pysheds>=0.3",
-  "pyyaml>=6.0"
+  "pyyaml>=6.0",
+  "rasterstats>=0.19"
 ]
 
 [project.optional-dependencies]
