@@ -30,21 +30,61 @@ CHM can **automatically download, process, and analyse** spatial and temporal da
 
 ---
 
-## Installation
+# Installation
+
+To use the Catchment Health Metrics library, you need a suitable Python environment with the required scientific and geospatial libraries.
+
+Set up a Base Python Environment, include scientific Python stack:`numpy`, `pandas`, `jupyter`,`matplotlib`
+
+For **Windows users**, the simplest option is to install **Anaconda**, https://www.anaconda.com/download which provides all of these in one package.
+
+Additional dependencies used by the Catchment Health Metrics library are listed in **`requirements.txt`**.
+
+### Installation steps
+
+**Step 1 — Clone the repository (Git Bash or any terminal):**
 
 ```bash
-# Standard installation
-pip install .
+cd "C:\GitHub"
+git clone https://github.com/mosaic-insights/Catchment-Health-Metrics.git
+```
 
-# Editable / development mode
-pip install -e .
+**Step 2 — Create and activate environment (Anaconda Prompt or VS Code terminal):**
 
-# Recommended workflow (with conda)
-conda create -n chm python=3.11 -y
+```bash
+conda create -n chm python=3.11
 conda activate chm
-pip install -e .[dev]
-pytest -q
+```
 
+**Step 3 — Install the package (editable mode):**
+
+```bash
+cd C:\GitHub\Catchment_Health_Metrics
+pip install -e .
+```
+
+**Step 4 — Install Jupyter kernel (optional but recommended):**
+
+```bash
+pip install ipykernel
+python -m ipykernel install --user --name chm --display-name "Python (chm)"
+```
+
+**Step 5 — Run in Jupyter:**
+Open Jupyter Notebook/Lab and select:
+
+**Python (chm)** kernel
+
+
+### Updating the package
+
+If there are updates in the GitHub repository:
+
+```bash
+conda activate chm
+cd C:\GitHub\Catchment_Health_Metrics
+git pull
+pip install -e .
 ```
 
 Python 3.10+ is required.
