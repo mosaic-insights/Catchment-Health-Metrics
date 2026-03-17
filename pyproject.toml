@@ -57,10 +57,10 @@ catchment-health-metrics = "chm.cli:app"
 
 # Tell Hatchling where to find packages
 [tool.hatch.build.targets.wheel]
-packages = [{ include = "chm", from = "src" }]
+packages = ["src/chm"]
+
 [tool.hatch.build.targets.wheel.force-include]
 "src/chm/py.typed" = "chm/py.typed"
-
 
 [tool.hatch.build.targets.sdist]
 include = ["src/**", "README.md", "LICENSE", "pyproject.toml"]
