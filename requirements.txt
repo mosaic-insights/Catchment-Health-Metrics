@@ -28,7 +28,7 @@ requests>=2.31
 typer>=0.12.3
 pydantic>=2.5
 pyyaml>=6.0
-
+rasterstats>=0.19,
 # === DEA tools (optional; heavy) ===
 # dea-tools>=0.3
 # NOTE: dea-tools may require system deps (e.g., GDAL stack).
