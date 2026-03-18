@@ -1,5 +1,5 @@
 # === Array / SciPy stack ===
-numpy>=1.24
+numpy>=1.24,<2.4
 pandas>=2.0
 scipy>=1.11
 matplotlib>=3.8
@@ -19,7 +19,7 @@ pystac-client>=0.7
 odc-stac>=0.3
 
 # === Hydro tools ===
-pysheds>=0.3
+pysheds>=0.4
 
 # === IO / utilities ===
 requests>=2.31
