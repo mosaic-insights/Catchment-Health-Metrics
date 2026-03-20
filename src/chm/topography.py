@@ -559,7 +559,15 @@ def _extract_stream_network(
         return max(clean.items(), key=lambda kv: kv[1])[0]
 
     streams["order"] = [_majority(d) for d in zs]
-    streams.to_file(out_gpkg, layer=layer_name, driver="GPKG", if_exists="replace")
+    # Remove existing GeoPackage so writing works across geopandas/pyogrio versions
+    for p in (out_gpkg, out_gpkg + "-wal", out_gpkg + "-shm"):
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+        except Exception:
+            pass
+
+    streams.to_file(out_gpkg, layer=layer_name, driver="GPKG")
     return streams
 
 
