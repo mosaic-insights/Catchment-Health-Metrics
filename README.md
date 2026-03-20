@@ -59,7 +59,7 @@ conda activate chm
 **Step 3 — Install the package (editable mode):**
 
 ```bash
-cd C:\GitHub\Catchment_Health_Metrics
+cd C:\GitHub\Catchment-Health-Metrics
 pip install -e .
 ```
 
@@ -82,7 +82,7 @@ If there are updates in the GitHub repository:
 
 ```bash
 conda activate chm
-cd C:\GitHub\Catchment_Health_Metrics
+cd C:\GitHub\Catchment-Health-Metrics
 git pull
 pip install -e .
 ```
