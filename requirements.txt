@@ -36,6 +36,7 @@ h5py>=3.10
 openpyxl>=3.1
 pyogrio>=0.7
 standard-precip
+contextily>=1.5
 
 # === DEA tools (optional; heavy) ===
 # dea-tools>=0.3

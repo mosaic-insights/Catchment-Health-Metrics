@@ -50,7 +50,8 @@ dependencies = [
   "h5py>=3.10",
   "openpyxl>=3.1",
   "pyogrio>=0.7",
-  "standard-precip"
+  "standard-precip",
+  "contextily>=1.5"
 ]
 
 [project.optional-dependencies]
