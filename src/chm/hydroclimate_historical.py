@@ -1,4 +1,3 @@
-# src/chm/hydroclimate_historical.py
 from __future__ import annotations
 
 # ============== stdlib ==============
@@ -194,8 +193,6 @@ def _sel_nearest(da: xr.DataArray, lon: float, lat: float) -> xr.DataArray:
 # ========================= Data source specifics =========================
 
 def _awap_url(root: str, var: str, reducer: str, year: int) -> str:
-    # Example:
-    # .../precip/total/r005/01day/agcd_v1-0-1_precip_total_r005_daily_2010.nc
     return (
         f"{root}/{var}/{reducer}/r005/01day/"
         f"agcd_v1-0-1_{var}_{reducer}_r005_daily_{year}.nc"
@@ -203,7 +200,6 @@ def _awap_url(root: str, var: str, reducer: str, year: int) -> str:
 
 
 def _awral_url(root: str, var: str, year: int) -> str:
-    # Example: .../qtot_2010.nc
     return f"{root}/{var}_{year}.nc"
 
 
@@ -229,17 +225,16 @@ def _aggregate_annual(df_daily: pd.DataFrame, var_pretty_list: List[str]) -> pd.
     df = df.dropna(subset=["Date"]).copy()
     df["Year"] = df["Date"].dt.year
 
-    # Build per-column aggregator
     agg = {}
     for pretty in var_pretty_list:
         low = pretty.lower()
         is_flux = (
-            "precip" in low or           # AGCD/AWAP precipitation
-            "runoff" in low or           # AWRAL qtot
-            "actual et" in low or "et" == low.strip()  # AWRAL etot
+            "precip" in low or
+            "runoff" in low or
+            "actual et" in low or "et" == low.strip()
         )
         if is_flux:
-            agg[pretty] = (lambda s: s.sum(min_count=1))  # <<< key change
+            agg[pretty] = (lambda s: s.sum(min_count=1))
         else:
             agg[pretty] = "mean"
 
@@ -248,11 +243,9 @@ def _aggregate_annual(df_daily: pd.DataFrame, var_pretty_list: List[str]) -> pd.
 
     annual = df.groupby("Year").agg(agg).reset_index()
 
-    # tidy rounding
     for c in [c for c in annual.columns if c != "Year"]:
         annual[c] = pd.to_numeric(annual[c], errors="coerce").round(2)
     return annual
-
 
 
 def _plot_annual_subplots(
@@ -281,30 +274,28 @@ def _plot_annual_subplots(
         y = annual_df[var]
         ax.plot(x, y, color="black", marker="o", linewidth=1.5)
         unit = f" ({units_map.get(var, '')})" if units_map and var in units_map and units_map[var] else ""
-        ax.set_ylabel(f"{var}{unit}",fontsize=11, fontweight="bold")
+        ax.set_ylabel(f"{var}{unit}", fontsize=11, fontweight="bold")
         ax.tick_params(axis="both", labelsize=11)
         ax.grid(alpha=0.25)
 
-    axes[-1].set_xlabel("Year",fontsize=11, fontweight="bold")
-
-    #fig.suptitle(title, y=0.98)
+    axes[-1].set_xlabel("Year", fontsize=11, fontweight="bold")
     fig.tight_layout(rect=[0, 0, 1, 0.96])
 
     os.makedirs(os.path.dirname(outfile), exist_ok=True)
     fig.savefig(outfile, dpi=300)
     plt.close(fig)
 
+
 def _to_time_df(da: xr.DataArray, pretty_name: str) -> pd.DataFrame:
     """
     Make a clean (time, value) DataFrame from a 1D time DataArray.
     Drops non-index coords (eg. 'spatial_ref') to avoid merge collisions.
     """
-    # ensure only the time dimension remains; drop non-index coords like 'spatial_ref'
     da = da.reset_coords(drop=True)
     df = da.to_dataframe(name=pretty_name).reset_index()
-    # keep only what we merge on
     keep = [c for c in df.columns if c in ("time", pretty_name)]
     return df[keep]
+
 
 # ========================= Main API =========================
 
@@ -327,7 +318,7 @@ def hydroclimate_historical(cfg: HistoricalConfig) -> str:
      sites_datasets, catch_plots, sites_plots) = _scaffold(cfg.chm_workspace, cfg.catchment_path, cfg.out_subdir)
 
     catch_layer = f"{catchment_name} Data"
-    catch_gpkg  = os.path.join(catch_datasets, f"{catchment_name} Data.gpkg")
+    catch_gpkg = os.path.join(catch_datasets, f"{catchment_name} Data.gpkg")
     all_sites_gpkg = cfg.sites_gpkg or os.path.join(sites_datasets, f"{catchment_name} Sites Data.gpkg")
 
     # ---- catchment geometry / bbox ----
@@ -338,12 +329,10 @@ def hydroclimate_historical(cfg: HistoricalConfig) -> str:
     catch_union = catch_gdf.unary_union
     catch_cent = catch_union.centroid
 
-    # Order for final outputs (max 7 variables)
     combined_order_short = ["precip", "tmax", "tmin", "qtot", "etot", "s0", "sd"]
     pretty_map = {**cfg.awap_vars, **cfg.awral_vars}
     combined_pretty_order = [pretty_map[k] for k in combined_order_short if k in pretty_map]
 
-    # Units for plots
     units = {
         "Precipitation": "mm/yr",
         "Min Temperature": "°C",
@@ -355,11 +344,6 @@ def hydroclimate_historical(cfg: HistoricalConfig) -> str:
     }
 
     # ========================= (1) Download & cache (AWAP + AWRAL) =========================
-    # Files are kept in the SAME folder (hist_folder). We prefix file names to avoid collisions.
-    #   - AWAP:   awap_<var>_<year>_clipped.nc
-    #   - AWRAL:  awral_<var>_<year>_clipped.nc
-
-    # ---- AWAP ----
     if cfg.enable_awap:
         for var, pretty in cfg.awap_vars.items():
             reducer = cfg.awap_reducers.get(var, "mean")
@@ -372,7 +356,7 @@ def hydroclimate_historical(cfg: HistoricalConfig) -> str:
                 url = _awap_url(cfg.awap_root, var, reducer, year)
                 try:
                     ds = xr.open_dataset(url)
-                    clipped = _subset_bbox_generic(ds, var, bbox)  # AWAP file already 1-year
+                    clipped = _subset_bbox_generic(ds, var, bbox)
                     encoding = {var: {"zlib": True, "complevel": 4, "dtype": "float32"}}
                     clipped.to_netcdf(out_nc, encoding=encoding)
                     print(f"[ok] wrote {os.path.basename(out_nc)}")
@@ -384,7 +368,6 @@ def hydroclimate_historical(cfg: HistoricalConfig) -> str:
                     except Exception:
                         pass
 
-    # ---- AWRAL ----
     if cfg.enable_awral:
         for var, pretty in cfg.awral_vars.items():
             print(f"\n[AWRAL] {pretty} [{var}]...")
@@ -408,12 +391,10 @@ def hydroclimate_historical(cfg: HistoricalConfig) -> str:
                     except Exception:
                         pass
 
-    # Build index of files by variable (combined)
     nc_by_var: Dict[str, List[str]] = {k: [] for k in combined_order_short if k in pretty_map}
     for fn in sorted(os.listdir(hist_folder)):
         if not fn.endswith(".nc"):
             continue
-        # detect pattern "awap_var_year" or "awral_var_year"
         for v in nc_by_var:
             if fn.startswith(f"awap_{v}_") or fn.startswith(f"awral_{v}_"):
                 nc_by_var[v].append(os.path.join(hist_folder, fn))
@@ -431,7 +412,6 @@ def hydroclimate_historical(cfg: HistoricalConfig) -> str:
                     da = ds[short] if short in ds.variables else ds[list(ds.data_vars)[0]]
                     try:
                         masked_mean = _mask_mean_over_geoms(da, catch_geoms)
-                        # Check that mask included pixels; fallback to nearest if not
                         if np.count_nonzero(~np.isnan(masked_mean.isel(time=0))) == 0:
                             raise ValueError("zero-footprint")
                         daily_mean = masked_mean
@@ -447,7 +427,6 @@ def hydroclimate_historical(cfg: HistoricalConfig) -> str:
             pd.concat(series_parts, ignore_index=True) if series_parts else pd.DataFrame()
         )
 
-    # merge across variables
     catch_df: Optional[pd.DataFrame] = None
     for short in combined_order_short:
         if short not in daily_df_by_var:
@@ -458,7 +437,6 @@ def hydroclimate_historical(cfg: HistoricalConfig) -> str:
         df = df.sort_values("time")
         catch_df = df if catch_df is None else pd.merge(catch_df, df, on="time", how="outer")
 
-    # ---- write combined catchment daily CSV ----
     if catch_df is not None and not catch_df.empty:
         out_df = catch_df.rename(columns={"time": "Date"}).copy()
         out_df["Date"] = pd.to_datetime(out_df["Date"])
@@ -470,9 +448,9 @@ def hydroclimate_historical(cfg: HistoricalConfig) -> str:
         for c in pretty_cols:
             csv_df[c] = pd.to_numeric(csv_df[c], errors="coerce").round(2)
 
-        out_csv = os.path.join(hist_folder, f"{catchment_name}_historical_daily.csv")
+        out_csv = os.path.join(hist_folder, f"{catchment_name}_historical_hydroclimate_daily.csv")
         csv_df.to_csv(out_csv, index=False)
-        out_csv_ = os.path.join(catch_plots, f"{catchment_name}_historical_daily.csv")
+        out_csv_ = os.path.join(catch_plots, f"{catchment_name}_historical_hydroclimate_daily.csv")
         csv_df.to_csv(out_csv_, index=False)
         print(f"[OK] Catchment combined daily CSV: {out_csv}")
     else:
@@ -486,7 +464,7 @@ def hydroclimate_historical(cfg: HistoricalConfig) -> str:
 
         annual_catch = _aggregate_annual(c_daily[["Date"] + pretty_cols], pretty_cols)
         if not annual_catch.empty:
-            annual_csv = os.path.join(hist_folder, f"{catchment_name}_historical_annual.csv")
+            annual_csv = os.path.join(hist_folder, f"{catchment_name}_historical_hydroclimate_annual.csv")
             annual_catch.to_csv(annual_csv, index=False)
             print(f"[OK] Catchment combined annual CSV: {annual_csv}")
 
@@ -503,16 +481,15 @@ def hydroclimate_historical(cfg: HistoricalConfig) -> str:
     # ========================= (4) Sites: daily + annual + subplot (combined) =========================
     if cfg.make_site_csvs:
         try:
-            # load sites
+            sites_gdf = gpd.GeoDataFrame()
+
             if not os.path.exists(all_sites_gpkg):
                 print(f"[WARN] sites GPKG not found: {all_sites_gpkg} — skipping sites.")
             else:
-                # Try default layer; if that fails, try common layer names
                 try:
                     sites_gdf = gpd.read_file(all_sites_gpkg).to_crs(epsg=4326)
                 except Exception:
                     tried_layers = [f"{catchment_name} Sites Data", "Sites", "sites"]
-                    sites_gdf = None
                     for lyr in tried_layers:
                         try:
                             sites_gdf = gpd.read_file(all_sites_gpkg, layer=lyr).to_crs(epsg=4326)
@@ -520,11 +497,10 @@ def hydroclimate_historical(cfg: HistoricalConfig) -> str:
                             break
                         except Exception:
                             pass
-                    if sites_gdf is None:
+                    if sites_gdf.empty:
                         print(f"[ERROR] could not load any sites layer from {all_sites_gpkg}; skipping sites.")
-                        sites_gdf = gpd.GeoDataFrame()
 
-                # iterate sites
+            if sites_gdf is not None and not sites_gdf.empty:
                 for idx, site in sites_gdf.iterrows():
                     sid = site.get("Site_id") or site.get("site_id") or site.get("Site_ID") or idx
                     geom_list = [site.geometry]
@@ -533,7 +509,6 @@ def hydroclimate_historical(cfg: HistoricalConfig) -> str:
 
                     site_df: Optional[pd.DataFrame] = None
 
-                    # For each variable (AWAP + AWRAL), process all available files
                     for short, pretty in pretty_map.items():
                         if short not in nc_by_var:
                             continue
@@ -562,7 +537,6 @@ def hydroclimate_historical(cfg: HistoricalConfig) -> str:
                             site_df = vdf if site_df is None else pd.merge(site_df, vdf, on="time", how="outer")
 
                     if site_df is not None and not site_df.empty:
-                        # ---- write combined site daily CSV ----
                         site_df.rename(columns={"time": "Date"}, inplace=True)
                         site_df["Date"] = pd.to_datetime(site_df["Date"])
                         site_df.sort_values("Date", inplace=True)
@@ -572,14 +546,12 @@ def hydroclimate_historical(cfg: HistoricalConfig) -> str:
                         out_daily["Date"] = out_daily["Date"].dt.strftime("%d/%m/%Y")
                         out_daily = out_daily[["Date"] + pretty_cols_site].round(2)
 
-                        out_csv_daily = os.path.join(site_folder, f"Site_{sid}_historical_daily.csv")
+                        out_csv_daily = os.path.join(site_folder, f"Site_{sid}_historical_hydroclimate_daily.csv")
                         out_daily.to_csv(out_csv_daily, index=False)
-                        #print(f"[OK] site {sid} combined daily CSV: {out_csv_daily}")
 
-                        # ---- site annual CSV + subplot ----
                         annual_site = _aggregate_annual(site_df[["Date"] + pretty_cols_site], pretty_cols_site)
                         if not annual_site.empty:
-                            out_csv_annual = os.path.join(site_folder, f"Site_{sid}_historical_annual.csv")
+                            out_csv_annual = os.path.join(site_folder, f"Site_{sid}_historical_hydroclimate_annual.csv")
                             annual_site.to_csv(out_csv_annual, index=False)
 
                             var_order_pretty = [pretty_map[k] for k in combined_order_short if pretty_map.get(k) in annual_site.columns]

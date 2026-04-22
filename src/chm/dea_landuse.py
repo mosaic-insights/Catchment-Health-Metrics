@@ -1,4 +1,3 @@
-# src/chm/dea_landuse.py
 from __future__ import annotations
 
 # ---------- stdlib ----------
@@ -66,6 +65,10 @@ class DEALanduseConfig:
 
 # ========================= Helpers =========================
 
+def _log(status: str, message: str) -> None:
+    print(f"[{status}] {message}")
+
+
 def _ensure_dirs(paths: Iterable[Path]) -> None:
     for p in paths:
         p.mkdir(parents=True, exist_ok=True)
@@ -74,12 +77,12 @@ def _ensure_dirs(paths: Iterable[Path]) -> None:
 def _scaffold(cfg: DEALanduseConfig) -> Tuple[str, Path, Path, Path, Path, Path]:
     name = Path(cfg.catchment_path).stem.replace("_", " ")
     base = Path(cfg.chm_workspace) / name
-    cds  = base / "Catchment Datasets"
+    cds = base / "Catchment Datasets"
     land = cds / "Landuse"
-    dea  = land / "DEA Landcover"
-    sds  = base / "Sites Datasets"
-    sps  = base / "Sites Plots and Maps"
-    cps  = base / "Catchment Plots and Maps"
+    dea = land / "DEA Landcover"
+    sds = base / "Sites Datasets"
+    sps = base / "Sites Plots and Maps"
+    cps = base / "Catchment Plots and Maps"
     _ensure_dirs([base, cds, land, dea, sds, sps, cps])
     return name, cds, dea, sds, sps, cps
 
@@ -174,6 +177,7 @@ def _reproject_to_catchment_crs(
 
     return out_path
 
+
 def _plot_catchment_map(
     catchment_name: str,
     raster_path: Path,
@@ -183,15 +187,12 @@ def _plot_catchment_map(
     year: int,
     out_png: Path,
 ) -> None:
-    # Reproject raster to match catchment CRS (so frame looks upright)
-    reproj_tif = _reproject_to_catchment_crs(raster_path, gdf_catch)
-
-    with rio.open(reproj_tif) as src:
+    # Reproject raster to geographic coordinates for plotting only
+    with rio.open(raster_path) as src:
         arr = src.read(1)
         nd = src.nodata if src.nodata is not None else 255
-        bounds, crs = src.bounds, src.crs
+        src_meta = src.meta.copy()
 
-    # Find only the land-cover classes we care about
     present_vals = [
         int(v) for v in np.unique(arr)
         if int(v) in code_to_label and int(v) != nd
@@ -212,18 +213,47 @@ def _plot_catchment_map(
     idx_ma = np.ma.masked_equal(idx, -1)
     cmap = ListedColormap(colors)
 
-    # Catchment is already in this CRS
-    gdf_plot = gdf_catch
+    # --- reproject for plotting in degrees ---
+    src_crs = src_meta["crs"]
+    src_transform = src_meta["transform"]
+    src_width = src_meta["width"]
+    src_height = src_meta["height"]
+
+    left, bottom, right, top = rio.transform.array_bounds(src_height, src_width, src_transform)
+    dst_transform, dst_width, dst_height = calculate_default_transform(
+        src_crs, "EPSG:4326", src_width, src_height, left, bottom, right, top
+    )
+
+    dst_array = np.full((dst_height, dst_width), -1, dtype=np.int32)
+
+    reproject(
+        source=idx.astype("int32"),
+        destination=dst_array,
+        src_transform=src_transform,
+        src_crs=src_crs,
+        dst_transform=dst_transform,
+        dst_crs="EPSG:4326",
+        resampling=Resampling.nearest,
+        src_nodata=-1,
+        dst_nodata=-1,
+    )
+
+    xmin, ymin, xmax, ymax = rio.transform.array_bounds(dst_height, dst_width, dst_transform)
+    extent = (xmin, xmax, ymin, ymax)
+
+    idx_ma_plot = np.ma.masked_equal(dst_array, -1)
+    catch_plot = gdf_catch.to_crs(epsg=4326)
 
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.imshow(
-        idx_ma,
-        extent=[bounds.left, bounds.right, bounds.bottom, bounds.top],
+        idx_ma_plot,
+        extent=extent,
         cmap=cmap,
         interpolation="nearest",
         origin="upper",
     )
-    gdf_plot.boundary.plot(
+
+    catch_plot.boundary.plot(
         ax=ax, edgecolor="black", facecolor="none", linewidth=1.3
     )
 
@@ -234,6 +264,8 @@ def _plot_catchment_map(
     ax.legend(
         handles=legend_patches,
         loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        borderaxespad=0.0,
         fontsize=7,
         frameon=False,
     )
@@ -243,17 +275,18 @@ def _plot_catchment_map(
         fontsize=11,
         fontweight="bold",
     )
-    ax.set_xlabel("Easting (m)", fontsize=10, fontweight="bold")
-    ax.set_ylabel("Northing (m)", fontsize=10, fontweight="bold")
+    ax.set_xlabel("Longitude (°)", fontsize=10, fontweight="bold")
+    ax.set_ylabel("Latitude (°)", fontsize=10, fontweight="bold")
 
     ax.tick_params(axis="both", labelsize=10)
     ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
     ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
+    ax.ticklabel_format(style="plain", axis="both", useOffset=False)
     ax.grid(True, linestyle="--", alpha=0.5)
 
-    plt.tight_layout()
-    plt.savefig(out_png, dpi=300, bbox_inches="tight")
-    plt.close()
+    fig.tight_layout(rect=[0, 0, 0.80, 1])
+    fig.savefig(out_png, dpi=300, bbox_inches="tight")
+    plt.close(fig)
 
 
 def _plot_timeseries(
@@ -265,20 +298,35 @@ def _plot_timeseries(
 ) -> None:
     if df_pct.empty:
         return
-    plt.figure(figsize=(6, 4))
+
+    fig, ax = plt.subplots(figsize=(10, 4))
     for code in df_pct.columns:
-        # Works for numeric or already-renamed columns
         label = code_to_label.get(code, str(code))
-        plt.plot(df_pct.index, df_pct[code], linewidth=1.3, label=f"{label}")
-    plt.title(title, fontsize=11, fontweight="bold")
-    plt.xlabel("Year", fontsize=10, fontweight="bold")
-    plt.ylabel(ylabel, fontsize=10, fontweight="bold")
-    plt.gca().tick_params(axis="both", labelsize=10)  # <- fix (ax was undefined)
-    plt.grid(True, linestyle="--", alpha=0.5)
-    plt.legend(loc="upper left", fontsize=7, frameon=False,)
-    plt.tight_layout()
-    plt.savefig(out_png, dpi=300, bbox_inches="tight")
-    plt.close()
+        ax.plot(df_pct.index, df_pct[code], linewidth=1.3, label=f"{label}")
+
+    ax.set_title(title, fontsize=11, fontweight="bold")
+    ax.set_xlabel("Year", fontsize=10, fontweight="bold")
+    ax.set_ylabel(ylabel, fontsize=10, fontweight="bold")
+    years = df_pct.index.astype(int)
+    ax.set_xticks(years)
+    ax.set_xticklabels(years)
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+    ax.tick_params(axis="both", labelsize=10)
+    ax.grid(True, linestyle="--", alpha=0.5)
+
+    ax.legend(
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        borderaxespad=0.0,
+        fontsize=7,
+        frameon=False,
+    )
+
+    fig.tight_layout(rect=[0, 0, 0.78, 1])
+    fig.savefig(out_png, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
 
 # ========================= Main API =========================
 
@@ -290,20 +338,26 @@ def dea_landuse_change(cfg: DEALanduseConfig) -> Tuple[Path, Path]:
     Returns:
         (dea_dataset_folder, sites_dataset_folder)
     """
+    _log("INFO", "Starting DEA land cover processing...")
+
     # ---- folders / names ----
     name, catch_ds, dea_ds, sites_ds, sites_plots, catch_plots = _scaffold(cfg)
     all_sites_gpkg = sites_ds / f"{name} Sites Data.gpkg"
+
+    _log("OK", f"Workspace folders prepared for {name}")
+    _log("INFO", f"DEA dataset folder: {dea_ds}")
 
     # ---- inputs ----
     catch_gdf = gpd.read_file(cfg.catchment_path)
     if catch_gdf.crs is None:
         raise ValueError("Catchment file has no CRS. Please define one before running.")
+    _log("OK", f"Catchment loaded: {cfg.catchment_path}")
 
     class_codes = list(cfg.classes.keys())
 
     # ---- (1) download + clip per year ----
     if cfg.download_if_missing:
-        print("Checking/downloading DEA Land Cover yearly mosaics...")
+        _log("INFO", "Checking/downloading DEA Land Cover yearly mosaics...")
         for year in range(cfg.start_year, cfg.end_year + 1):
             fname = f"ga_ls_landcover_class_cyear_3_mosaic_{year}--P1Y_{cfg.dea_level}.tif"
             url = f"{cfg.dea_base_root}/{year}--P1Y/{fname}"
@@ -312,41 +366,47 @@ def dea_landuse_change(cfg: DEALanduseConfig) -> Tuple[Path, Path]:
 
             try:
                 if not _valid_tif(raw_tif):
-                    print(f"  • downloading {year}: {url}")
+                    _log("INFO", f"Downloading DEA Land Cover for {year}")
                     _stream_download(url, raw_tif, timeout=cfg.request_timeout, chunk=cfg.chunk_bytes)
+                    _log("OK", f"Downloaded raw DEA raster for {year}")
+                else:
+                    _log("INFO", f"Raw DEA raster already exists for {year}")
 
                 if not _valid_tif(clipped_tif):
                     with rio.open(raw_tif) as src:
                         geom_in = catch_gdf.to_crs(src.crs)
                         geoms = [g for g in geom_in.geometry if g and not g.is_empty]
                         if not geoms:
-                            print(f"  [warn] no valid geometries for clipping → skipping {year}")
+                            _log("WARN", f"No valid geometries for clipping in {year}; skipping")
                             continue
                         img, tr = rio_mask(src, geoms, crop=True, nodata=src.nodata)
                         meta = src.meta.copy()
                         meta.update({"height": img.shape[1], "width": img.shape[2], "transform": tr})
                         with rio.open(clipped_tif, "w", **meta) as dst:
                             dst.write(img)
-                    print(f"  • saved clipped {year}")
+                    _log("OK", f"Saved clipped DEA raster for {year}")
                 else:
-                    print(f"  • [cache] clipped {year} exists")
+                    _log("INFO", f"Clipped DEA raster already exists for {year}")
+
             except requests.HTTPError as e:
-                print(f"[HTTP {year}] {e} :: {url}")
+                _log("WARN", f"HTTP error for {year}: {e}")
             except requests.RequestException as e:
-                print(f"[Network {year}] {e} :: {url}")
+                _log("WARN", f"Network error for {year}: {e}")
             except Exception as e:
-                print(f"[Error {year}] {e}")
+                _log("WARN", f"Error processing DEA raster for {year}: {e}")
 
     # ---- (2) catchment-level % by class, maps, time series ----
-    print("Computing catchment class percentages + maps...")
+    _log("INFO", "Computing catchment class percentages and maps...")
     rows: List[Dict[int, float]] = []
     for year in range(cfg.start_year, cfg.end_year + 1):
         clipped_tif = dea_ds / f"Landuse_{year}_clipped.tif"
         if not _valid_tif(clipped_tif):
+            _log("WARN", f"Missing clipped DEA raster for {year}; skipping")
             continue
 
         pct = _clip_and_pct(clipped_tif, catch_gdf, class_codes)
         rows.append({"Year": year, **pct})
+        _log("OK", f"Catchment percentages computed for {year}")
 
         if cfg.make_maps:
             try:
@@ -359,123 +419,130 @@ def dea_landuse_change(cfg: DEALanduseConfig) -> Tuple[Path, Path]:
                     year=year,
                     out_png=catch_plots / f"Catchment_DEA_LandCover_{year}.png",
                 )
+                _log("OK", f"Catchment map saved for {year}")
             except Exception as e:
-                print(f"[map {year}] {e}")
+                _log("WARN", f"Catchment map failed for {year}: {e}")
 
     catch_pct_df = pd.DataFrame(rows).set_index("Year").sort_index()
     if not catch_pct_df.empty:
         out_csv = dea_ds / "Catchment_LU_Percentages.csv"
-    
-        # --- NEW: write a human-friendly CSV with class names as columns ---
-        catch_pct_df_named = catch_pct_df.rename(columns=cfg.classes)  # 111->"Cultivated Terrestrial Vegetation", etc.
+        out_csv_ = catch_plots / "Catchment_LU_Percentages.csv"
+
+        catch_pct_df_named = catch_pct_df.rename(columns=cfg.classes)
         catch_pct_df_named.to_csv(out_csv, float_format="%.3f")
-        print(f"[OK] wrote {out_csv}")
-    
-        # Plots can keep using the numeric-code columns (stable programmatic keys)
+        catch_pct_df_named.to_csv(out_csv_, float_format="%.3f")
+        _log("OK", f"Catchment percentage CSV saved in datasets and plots folders")
+
         ts_pct = catch_plots / "Catchment_LU_Percentages_OverTime.png"
         _plot_timeseries(
-            catch_pct_df[class_codes],     # still codes for internal plotting
+            catch_pct_df[class_codes],
             cfg.classes,
             f"{name} – Class Percentages Over Time",
             "Percent (%)",
             ts_pct
         )
-    
+        _log("OK", "Catchment percentages over time plot saved")
+
         base = catch_pct_df.iloc[0]
         pp_change = catch_pct_df[class_codes].subtract(base[class_codes], axis="columns")
-    
-        # (Optional) also save PP-change with friendly names
-        # --- Save PP-change with human-friendly names into the DEA dataset folder ---
-        pp_change_named = pp_change.rename(columns=cfg.classes)
-        
-        pp_change_csv = dea_ds / "Catchment_LU_PercentagePointChange.csv"
-        pp_change_csv.parent.mkdir(parents=True, exist_ok=True)  # safety
-        pp_change_named.to_csv(pp_change_csv, float_format="%.3f")
-        print(f"[OK] wrote {pp_change_csv}")
 
-    
+        pp_change_named = pp_change.rename(columns=cfg.classes)
+        pp_change_csv = dea_ds / "Catchment_LU_PercentagePointChange.csv"
+        pp_change_csv.parent.mkdir(parents=True, exist_ok=True)
+        pp_change_named.to_csv(pp_change_csv, float_format="%.3f")
+        _log("OK", "Catchment percentage-point change CSV saved")
+
         ts_pp = catch_plots / "Catchment_LU_PercentagePointChange.png"
         _plot_timeseries(
-            pp_change,                 # keep numeric codes for consistent plotting
+            pp_change,
             cfg.classes,
             f"{name} – Percentage-Point Change (vs {catch_pct_df.index[0]})",
             "Δ percentage points",
             ts_pp,
         )
-
-        _plot_timeseries(pp_change, cfg.classes, f"{name} – Percentage-Point Change (vs {catch_pct_df.index[0]})", "Δ percentage points", ts_pp)
+        _log("OK", "Catchment percentage-point change plot saved")
     else:
-        print("[info] no catchment rows computed.")
+        _log("INFO", "No catchment rows computed.")
 
     # ---- (3) per-site % by class (optional) ----
-    if cfg.make_site_outputs and (all_sites_gpkg.exists()):
-        try:
-            sites_gdf = gpd.read_file(all_sites_gpkg)
-            if sites_gdf.crs and (sites_gdf.crs != catch_gdf.crs):
-                sites_gdf = sites_gdf.to_crs(catch_gdf.crs)
-        except Exception as e:
-            print(f"[warn] could not read sites gpkg: {e}")
-            sites_gdf = None
+    if cfg.make_site_outputs:
+        if all_sites_gpkg.exists():
+            try:
+                sites_gdf = gpd.read_file(all_sites_gpkg)
+                if sites_gdf.crs and (sites_gdf.crs != catch_gdf.crs):
+                    sites_gdf = sites_gdf.to_crs(catch_gdf.crs)
+                _log("OK", f"Sites loaded: {all_sites_gpkg}")
+            except Exception as e:
+                _log("WARN", f"Could not read sites GPKG: {e}")
+                sites_gdf = None
 
-        if sites_gdf is not None and len(sites_gdf) > 0:
-            print("Computing site class percentages + time series...")
-            for _, row in sites_gdf.iterrows():
-                site_id = row.get("Site_id", None)
-                sgdf = gpd.GeoDataFrame([row.drop(labels=["geometry"])], geometry=[row.geometry], crs=sites_gdf.crs)
+            if sites_gdf is not None and len(sites_gdf) > 0:
+                _log("INFO", "Computing site class percentages and time series...")
+                for _, row in sites_gdf.iterrows():
+                    site_id = row.get("Site_id", None)
+                    _log("INFO", f"Processing Site {site_id}...")
 
-                series: List[Dict[int, float]] = []
-                for year in range(cfg.start_year, cfg.end_year + 1):
-                    clipped_tif = dea_ds / f"Landuse_{year}_clipped.tif"
-                    if not _valid_tif(clipped_tif):
+                    sgdf = gpd.GeoDataFrame([row.drop(labels=["geometry"])], geometry=[row.geometry], crs=sites_gdf.crs)
+
+                    series: List[Dict[int, float]] = []
+                    for year in range(cfg.start_year, cfg.end_year + 1):
+                        clipped_tif = dea_ds / f"Landuse_{year}_clipped.tif"
+                        if not _valid_tif(clipped_tif):
+                            continue
+                        try:
+                            pct = _clip_and_pct(clipped_tif, sgdf, class_codes)
+                            series.append({"Year": year, **pct})
+                            _log("OK", f"Site {site_id}: percentages computed for {year}")
+                        except Exception as e:
+                            _log("WARN", f"Site {site_id}, year {year} failed: {e}")
+
+                    site_df = pd.DataFrame(series).set_index("Year").sort_index()
+                    site_dir = sites_ds / f"Site_{site_id}"
+                    site_plot_dir = (Path(cfg.chm_workspace) / name / "Sites Plots and Maps" / f"Site_{site_id}")
+                    _ensure_dirs([site_dir, site_plot_dir])
+
+                    if site_df.empty:
+                        _log("INFO", f"Site {site_id}: no valid rows computed")
                         continue
-                    try:
-                        pct = _clip_and_pct(clipped_tif, sgdf, class_codes)
-                        series.append({"Year": year, **pct})
-                    except Exception as e:
-                        print(f"[site {site_id} {year}] {e}")
 
-                site_df = pd.DataFrame(series).set_index("Year").sort_index()
-                site_dir = sites_ds / f"Site_{site_id}"
-                site_plot_dir = (Path(cfg.chm_workspace) / name / "Sites Plots and Maps" / f"Site_{site_id}")
-                _ensure_dirs([site_dir, site_plot_dir])
+                    out_site_csv = site_plot_dir / f"Site_{site_id}_LU_Percentages.csv"
+                    site_df_named = site_df.rename(columns=cfg.classes)
+                    site_df_named.to_csv(out_site_csv, float_format="%.3f")
+                    _log("OK", f"Site {site_id}: percentage CSV saved")
 
-                if site_df.empty:
-                    continue
-                    
-                out_site_csv = site_plot_dir / f"Site_{site_id}_LU_Percentages.csv"                
-                # --- NEW: write site CSV with human-friendly class names ---
-                site_df_named = site_df.rename(columns=cfg.classes)
-                site_df_named.to_csv(out_site_csv, float_format="%.3f")
-                
-                # Plots still use numeric-code columns for consistency
-                _plot_timeseries(
-                    site_df[class_codes],
-                    cfg.classes,
-                    f"Site {site_id} – Class Percentages Over Time",
-                    "Percent (%)",
-                    site_plot_dir / f"Site_{site_id}_LU_Percentages_OverTime.png",
-                )
-                
-                base_site = site_df.iloc[0]
-                site_pp = site_df[class_codes].subtract(base_site[class_codes], axis="columns")
-                
-                # (Optional) also save PP-change with friendly names
-                site_pp_named = site_pp.rename(columns=cfg.classes)
-                site_pp_named.to_csv(site_plot_dir / f"Site_{site_id}_LU_PercentagePointChange.csv", float_format="%.3f")
-                
-                _plot_timeseries(
-                    site_pp,
-                    cfg.classes,
-                    f"Site {site_id} – Percentage-Point Change (vs {site_df.index[0]})",
-                    "Δ percentage points",
-                    site_plot_dir / f"Site_{site_id}_LU_PercentagePointChange.png",
-                )
+                    _plot_timeseries(
+                        site_df[class_codes],
+                        cfg.classes,
+                        f"Site {site_id} – Class Percentages Over Time",
+                        "Percent (%)",
+                        site_plot_dir / f"Site_{site_id}_LU_Percentages_OverTime.png",
+                    )
+                    _log("OK", f"Site {site_id}: percentages over time plot saved")
 
-                gc.collect()
+                    base_site = site_df.iloc[0]
+                    site_pp = site_df[class_codes].subtract(base_site[class_codes], axis="columns")
+
+                    site_pp_named = site_pp.rename(columns=cfg.classes)
+                    site_pp_named.to_csv(site_plot_dir / f"Site_{site_id}_LU_PercentagePointChange.csv", float_format="%.3f")
+                    _log("OK", f"Site {site_id}: percentage-point change CSV saved")
+
+                    _plot_timeseries(
+                        site_pp,
+                        cfg.classes,
+                        f"Site {site_id} – Percentage-Point Change (vs {site_df.index[0]})",
+                        "Δ percentage points",
+                        site_plot_dir / f"Site_{site_id}_LU_PercentagePointChange.png",
+                    )
+                    _log("OK", f"Site {site_id}: percentage-point change plot saved")
+
+                    gc.collect()
+                    _log("OK", f"Site {site_id} completed")
+            else:
+                _log("INFO", "No sites found; skipping site outputs.")
         else:
-            print("[info] no sites found; skipping site outputs.")
+            _log("WARN", "Sites GPKG missing; site outputs will be skipped.")
     else:
-        print("[info] sites outputs disabled or sites gpkg missing.")
+        _log("INFO", "Site outputs disabled.")
 
-    print("Done (DEA land cover: download, clip, compositions, time series).")
+    _log("OK", "DEA land cover processing completed.")
     return dea_ds, sites_ds

@@ -1,4 +1,3 @@
-# src/chm/awral_projections.py
 from __future__ import annotations
 
 # ============== stdlib ==============
@@ -135,10 +134,12 @@ def _scaffold(workspace: str, catchment_path: str) -> Tuple[str, str, str, str, 
     catchment_name = os.path.splitext(os.path.basename(catchment_path))[0].replace("_", " ")
     catchment_folder = os.path.join(workspace, catchment_name)
     catch_datasets = os.path.join(catchment_folder, "Catchment Datasets")
+    catch_plots = os.path.join(catchment_folder, "Catchment Plots and Maps")
     hydro_folder = os.path.join(catch_datasets, "Hydroclimate")
     sites_datasets = os.path.join(catchment_folder, "Sites Datasets")
-    _ensure_dirs([catchment_folder, catch_datasets, hydro_folder, sites_datasets])
-    return catchment_name, catchment_folder, catch_datasets, hydro_folder, sites_datasets
+    sites_plots = os.path.join(catchment_folder, "Sites Plots and Maps")
+    _ensure_dirs([catchment_folder, catch_datasets, catch_plots, hydro_folder, sites_datasets])
+    return catchment_name, catchment_folder, catch_datasets, catch_plots, hydro_folder, sites_datasets, sites_plots
 
 
 def _default_sites_path(sites_datasets: str, catchment_name: str) -> str:
@@ -270,8 +271,10 @@ def hydroclimate_projections(cfg: AwralProjConfig) -> Tuple[Optional[str], str]:
         catchment_name,
         _catchment_folder,
         catch_datasets,
+        catch_plots,
         hydro_folder,
         sites_datasets,
+        sites_plots,
     ) = _scaffold(cfg.chm_workspace, cfg.catchment_path)
 
     out_folder = os.path.join(hydro_folder, cfg.out_subdir)
@@ -290,26 +293,28 @@ def hydroclimate_projections(cfg: AwralProjConfig) -> Tuple[Optional[str], str]:
     sites = None
     sites_path_used = cfg.sites_path or _default_sites_path(sites_datasets, catchment_name)
 
-    if cfg.make_site_csvs and os.path.exists(sites_path_used):
-        try:
-            sites = gpd.read_file(sites_path_used).to_crs(epsg=4326)
-        except Exception as e:
-            print(f"[WARN] Could not read sites layer: {e}. Proceeding without site CSVs.")
-            sites = None
-    else:
-        if cfg.make_site_csvs:
+    if cfg.make_site_csvs:
+        if os.path.exists(sites_path_used):
+            try:
+                sites = gpd.read_file(sites_path_used).to_crs(epsg=4326)
+            except Exception as e:
+                print(f"[WARN] Could not read sites layer: {e}. Proceeding without site CSVs.")
+                sites = None
+        else:
             print(f"[WARN] Sites layer not found: {sites_path_used}. Proceeding without site CSVs.")
 
-    if cfg.make_site_csvs and sites is None:
-        cfg.make_site_csvs = False
+    # keep workflow independent from sites
+    make_site_csvs = bool(cfg.make_site_csvs and sites is not None and not sites.empty)
 
     # ---- accumulators ----
     catch_merged: Optional[pd.DataFrame] = None
 
-    site_frames: Dict[str, pd.DataFrame] = {
-        str(row.get("Site_id", i)): pd.DataFrame()
-        for i, (_, row) in enumerate(sites.iterrows() if sites is not None else [])
-    }
+    site_frames: Dict[str, pd.DataFrame] = {}
+    if make_site_csvs:
+        site_frames = {
+            str(row.get("Site_id", i)): pd.DataFrame()
+            for i, (_, row) in enumerate(sites.iterrows())
+        }
 
     # ========== main loops ==========
     for proj_key, proj_name in cfg.projections.items():
@@ -373,7 +378,6 @@ def hydroclimate_projections(cfg: AwralProjConfig) -> Tuple[Optional[str], str]:
                 col_name = f"{pretty} - {proj_name}"
                 df_c = daily_catch.to_dataframe(name=col_name).reset_index()
 
-                # Keep only the time/value columns to avoid merge problems from spatial_ref and other coords
                 df_c["Date"] = pd.to_datetime(df_c["time"]).dt.date
                 df_c = df_c[["Date", col_name]].copy()
 
@@ -385,7 +389,7 @@ def hydroclimate_projections(cfg: AwralProjConfig) -> Tuple[Optional[str], str]:
                 print(f"[WARN] catchment mean failed for {proj_key} {var}: {e}")
 
             # ---------- B) Site daily mean ----------
-            if cfg.make_site_csvs and sites is not None:
+            if make_site_csvs:
                 for i, (_, row) in enumerate(sites.iterrows()):
                     sid = str(row.get("Site_id", i))
                     try:
@@ -398,7 +402,6 @@ def hydroclimate_projections(cfg: AwralProjConfig) -> Tuple[Optional[str], str]:
                         col_name = f"{pretty} - {proj_name}"
                         df_s = daily_site.to_dataframe(name=col_name).reset_index()
 
-                        # Keep only the time/value columns to avoid merge problems from spatial_ref and other coords
                         df_s["Date"] = pd.to_datetime(df_s["time"]).dt.date
                         df_s = df_s[["Date", col_name]].copy()
 
@@ -427,12 +430,19 @@ def hydroclimate_projections(cfg: AwralProjConfig) -> Tuple[Optional[str], str]:
             f"{catchment_name}_AWRAL_projections_daily.csv",
         )
         catch_merged.to_csv(out_catch_csv, index=False)
-        print(f"[OK] Catchment projections CSV: {out_catch_csv}")
+
+        out_catch_csv_ = os.path.join(
+            catch_plots,
+            f"{catchment_name}_AWRAL_projections_daily.csv",
+        )
+        catch_merged.to_csv(out_catch_csv_, index=False)
+        print(f"[OK] Catchment hydroclimate projections CSV: {out_catch_csv}")
+        print(f"[OK] Catchment hydroclimate projections CSV: {out_catch_csv_}")
     else:
         print("[INFO] No catchment projections CSV produced.")
 
     # ---- Per-site CSVs only ----
-    if cfg.make_site_csvs and sites is not None:
+    if make_site_csvs:
         for sid, df in site_frames.items():
             if df.empty:
                 print(f"[INFO] site {sid}: no data")
@@ -451,6 +461,17 @@ def hydroclimate_projections(cfg: AwralProjConfig) -> Tuple[Optional[str], str]:
                 f"Site {sid} Projected Hydrological Data.csv",
             )
             df.to_csv(out_csv, index=False)
+
+            site_folder_ = os.path.join(sites_plots, f"Site_{sid}")
+            _ensure_dirs([site_folder_])
+
+            out_csv_ = os.path.join(
+                site_folder_,
+                f"Site {sid} Projected Hydrological Data.csv",
+            )
+            df.to_csv(out_csv_, index=False)
+            print(f"[OK] Site_{sid} hydroclimate projections CSV: {out_csv}")
+            print(f"[OK] Site_{sid} hydroclimate projections CSV: {out_csv_}")
 
     print("Finished projected AWRAL processing.")
     return sites_path_used, sites_datasets

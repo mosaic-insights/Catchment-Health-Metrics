@@ -239,20 +239,20 @@ catchment-health-metrics/
 ## Example usage
 
 ```python
-from chm import veg_indices_and_c_factor, rusle_and_sdr_rusle, build_report
-from chm.veg_indices import VegConfig
+from chm.vegetation import VegConfig, veg_indices_and_c_factor
+
+CHM_Work_Space = r"C:\Users\...\Output"
+Catchment_Shapefile_Path = r"C:\Users\...\Coliban River.shp"
 
 cfg = VegConfig(
-    chm_workspace=r"C:\CHM\Output",
-    catchment_path=r"C:\CHM\Input\Catchment\Coliban_River.shp",
-    sites_path=r"C:\CHM\Input\Sites\Coliban_Sites.shp",
-    datetime_range="2010-01-01/2025-10-25",
+    chm_workspace=CHM_Work_Space,
+    catchment_path=Catchment_Shapefile_Path,
+    datetime_range="2024-01-01/2025-10-25",
+    catchment_crs=None, #"EPSG:3308"
     cloud_cover_lt=20,
-    riparian_buffer_m=30
+    riparian_buffer_m=30.0,
 )
-
 veg_indices_and_c_factor(cfg)
-build_report(r"C:\CHM\Output", r"C:\CHM\Input\Catchment\Coliban_River.shp")
 ```
 
 ## Worked Example
@@ -281,5 +281,23 @@ Datasets and services are credited to their respective providers, including:
 - Bureau of Meteorology (BoM AWRA-L)  
 - Australian Gridded Climate Data (AGCD)  
 - ABARES (Land use datasets)  
+
+## 📖 Citation
+
+If you use this package in your research, report, or project, please cite it as:
+
+**APA style:**
+
+Khaledi, J., Nyman, P., & Richards, P. (2026). *Catchment Health Metrics (CHM): A Python package for catchment-scale environmental analysis* (Version 0.1.0) [Software]. GitHub. https://github.com/mosaic-insights/Catchment-Health-Metrics
+
+**BibTeX:**
+```bibtex
+@software{khaledi2026chm,
+  author = {Khaledi, Jabbar and Nyman, Petter and Richards, Paul},
+  title = {Catchment Health Metrics (CHM): A Python package for catchment-scale environmental analysis},
+  year = {2026},
+  version = {0.1.0},
+  url = {https://github.com/mosaic-insights/Catchment-Health-Metrics}
+}
 
 **Maintainer**: Jabbar Khaledi – [jabbarkhaledi88@gmail.com](mailto:jabbarkhaledi88@gmail.com)

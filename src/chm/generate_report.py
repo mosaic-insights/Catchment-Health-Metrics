@@ -1,4 +1,3 @@
-# report_builder.py
 from __future__ import annotations
 
 # ── stdlib
@@ -49,7 +48,7 @@ class ReportConfig:
     sri12_png: str = "{catchment}_SRI12.png"
 
     # sizes
-    hydro_ts_size: Tuple[int, int] = (10, 15)  # taller to fit extra Mean Temperature panel
+    hydro_ts_size: Tuple[int, int] = (10, 15)
     bar_ts_size: Tuple[int, int] = (7, 4)
     default_dpi: int = 300
 
@@ -91,6 +90,10 @@ class ReportConfig:
 
 
 # ===================== small utils =====================
+def _log(status: str, message: str) -> None:
+    print(f"[{status}] {message}")
+
+
 def _ensure_dirs(paths: Iterable[Path]) -> None:
     for p in paths:
         p.mkdir(parents=True, exist_ok=True)
@@ -142,7 +145,6 @@ def _load_historical(cfg: ReportConfig, base: Path, catchment_name: str) -> Tupl
     hydro = datasets / "Hydroclimate"
     hist_dir = hydro / "Historical data"
 
-    # Preferred unified CSV
     candidates = [
         hist_dir / cfg.historical_daily_filename.format(catchment=catchment_name),
         datasets / cfg.historical_daily_filename.format(catchment=catchment_name),
@@ -159,11 +161,11 @@ def _load_historical(cfg: ReportConfig, base: Path, catchment_name: str) -> Tupl
                       "Runoff", "Actual ET", "Upper Soil Moisture", "Deeper Soil Moisture"]:
                 if c in df.columns:
                     df[c] = pd.to_numeric(df[c], errors="coerce")
+            _log("OK", f"Historical daily CSV loaded: {hist_path}")
             return df, dcol
         except Exception as e:
-            print(f"[WARN] failed to read unified daily CSV at {hist_path}: {e}")
+            _log("WARN", f"Failed to read unified daily CSV at {hist_path}: {e}")
 
-    # Legacy merge: AWAP + AWRAL
     awap_candidates = [
         datasets / cfg.awap_filename.format(catchment=catchment_name),
         hydro / "Historical AWAP" / cfg.awap_filename.format(catchment=catchment_name),
@@ -187,9 +189,12 @@ def _load_historical(cfg: ReportConfig, base: Path, catchment_name: str) -> Tupl
             for c in ["Precipitation", "Min Temperature", "Max Temperature"]:
                 if c in awap.columns:
                     awap[c] = pd.to_numeric(awap[c], errors="coerce")
+            _log("OK", f"Legacy AWAP CSV loaded: {awap_path}")
         except Exception as e:
-            print(f"[WARN] AWAP read failed: {e}")
+            _log("WARN", f"AWAP read failed: {e}")
             awap = pd.DataFrame()
+    else:
+        _log("WARN", "AWAP CSV not found for legacy fallback.")
 
     if awral_path:
         try:
@@ -200,11 +205,15 @@ def _load_historical(cfg: ReportConfig, base: Path, catchment_name: str) -> Tupl
             for c in ["Runoff", "Actual ET", "Upper Soil Moisture", "Deeper Soil Moisture"]:
                 if c in awral.columns:
                     awral[c] = pd.to_numeric(awral[c], errors="coerce")
+            _log("OK", f"Legacy AWRAL CSV loaded: {awral_path}")
         except Exception as e:
-            print(f"[WARN] AWRAL read failed: {e}")
+            _log("WARN", f"AWRAL read failed: {e}")
             awral = pd.DataFrame()
+    else:
+        _log("WARN", "AWRAL CSV not found for legacy fallback.")
 
     if awap.empty and awral.empty:
+        _log("WARN", "No historical hydroclimate CSVs could be loaded.")
         return pd.DataFrame(), "Date"
 
     if not awap.empty and not awral.empty:
@@ -212,6 +221,7 @@ def _load_historical(cfg: ReportConfig, base: Path, catchment_name: str) -> Tupl
         awap2 = awap.rename(columns={d_awap: dcol})
         awral2 = awral.rename(columns={d_awral: dcol})
         merged = pd.merge(awap2, awral2, on=dcol, how="outer").sort_values(dcol)
+        _log("OK", "Legacy AWAP and AWRAL CSVs merged.")
         return merged, dcol
     elif not awap.empty:
         return awap, d_awap
@@ -265,10 +275,11 @@ def _compute_spi_sri_from_daily(
     sri_png = plots / cfg.sri12_png.format(catchment=catchment_name)
 
     if not cfg.enable_spi_sri:
+        _log("INFO", "SPI/SRI disabled in config.")
         return (spi_png if spi_png.exists() else None, sri_png if sri_png.exists() else None)
 
     try:
-        from standard_precip import spi  # optional dependency
+        from standard_precip import spi
         spi_calc = spi.SPI()
 
         if not daily.empty and ("Precipitation" in daily.columns):
@@ -292,8 +303,9 @@ def _compute_spi_sri_from_daily(
                 f"{catchment_name} – SPI12 (Precipitation)", "SPI12",
                 spi_png, size=cfg.bar_ts_size, dpi=cfg.default_dpi
             )
+            _log("OK", f"SPI12 figure generated: {spi_png}")
         else:
-            print("[WARN] SPI12 skipped: 'Precipitation' not present in daily table.")
+            _log("WARN", "SPI12 skipped: 'Precipitation' not present in daily table.")
 
         if not daily.empty and ("Runoff" in daily.columns):
             runoff_m = (
@@ -316,22 +328,17 @@ def _compute_spi_sri_from_daily(
                 f"{catchment_name} – SRI12 (Runoff)", "SRI12",
                 sri_png, size=cfg.bar_ts_size, dpi=cfg.default_dpi
             )
+            _log("OK", f"SRI12 figure generated: {sri_png}")
         else:
-            print("[WARN] SRI12 skipped: 'Runoff' not present in daily table.")
+            _log("WARN", "SRI12 skipped: 'Runoff' not present in daily table.")
     except Exception as e:
-        print(f"[WARN] SPI/SRI step skipped: {e}")
+        _log("WARN", f"SPI/SRI step skipped: {e}")
 
     return (spi_png if spi_png.exists() else None, sri_png if sri_png.exists() else None)
 
 
 # ===================== annual aggregation (with Mean Temperature) =====================
 def _annual_from_daily(daily: pd.DataFrame, dcol: str) -> pd.DataFrame:
-    """
-    Build annual aggregates from unified (or merged legacy) daily table.
-    - Fluxes (Precip, Runoff, Actual ET): annual SUM with min_count=1  ➜ all-NaN year -> NaN (not 0)
-    - State vars & temperatures: annual MEAN
-    - Derived Mean Temperature = 0.5 * (Min + Max) (computed on daily, then annual mean)
-    """
     if daily.empty or dcol not in daily.columns:
         return pd.DataFrame()
 
@@ -339,7 +346,6 @@ def _annual_from_daily(daily: pd.DataFrame, dcol: str) -> pd.DataFrame:
     df[dcol] = pd.to_datetime(df[dcol], errors="coerce")
     df = df.dropna(subset=[dcol]).set_index(dcol)
 
-    # derive Mean Temperature at daily step if both min/max exist
     if ("Min Temperature" in df.columns) and ("Max Temperature" in df.columns):
         df["Mean Temperature"] = 0.5 * (
             pd.to_numeric(df["Min Temperature"], errors="coerce")
@@ -353,12 +359,11 @@ def _annual_from_daily(daily: pd.DataFrame, dcol: str) -> pd.DataFrame:
 
     pieces = []
     if sum_vars:
-        # KEY CHANGE: keep NaN if an annual window has no valid daily values
         pieces.append(df[sum_vars].resample("YE").sum(min_count=1))
     if mean_vars:
         pieces.append(df[mean_vars].resample("YE").mean())
     if others:
-        pieces.append(df[others].resample("YE").mean())  # conservative default
+        pieces.append(df[others].resample("YE").mean())
 
     if not pieces:
         return pd.DataFrame()
@@ -368,20 +373,23 @@ def _annual_from_daily(daily: pd.DataFrame, dcol: str) -> pd.DataFrame:
     return annual
 
 
-# ===================== hydroclimate plot (now with Mean Temperature panel) =====================
+# ===================== hydroclimate plot =====================
 def _hydro_ts_plot(cfg: ReportConfig, base: Path, catchment_name: str, annual: pd.DataFrame) -> Optional[Path]:
     plots_dir = base / cfg.catch_plots_dir
 
     reuse = _glob_first(plots_dir, cfg.hydro_ts_patterns)
     if reuse:
+        _log("INFO", f"Reusing existing hydroclimate plot: {reuse}")
         return reuse
 
     if annual is None or annual.empty:
+        _log("WARN", "Hydroclimate annual dataframe is empty; no hydro plot generated.")
         return None
 
     panel_order = ["Precipitation", "Mean Temperature", "Runoff", "Actual ET", "Upper Soil Moisture", "Deeper Soil Moisture"]
     series = {k: annual[k].dropna() for k in panel_order if k in annual.columns and annual[k].dropna().size > 0}
     if not series:
+        _log("WARN", "No valid hydroclimate annual series found for plotting.")
         return None
 
     def _to_year_xy(s):
@@ -426,15 +434,12 @@ def _hydro_ts_plot(cfg: ReportConfig, base: Path, catchment_name: str, annual: p
     fig.tight_layout(rect=[0, 0.01, 1, 0.97])
     fig.savefig(out_png, dpi=cfg.default_dpi)
     plt.close(fig)
+    _log("OK", f"Hydroclimate time series plot generated: {out_png}")
     return out_png
 
 
-# ===================== DEA landcover: build 2-row panel (first & last year) =====================
+# ===================== DEA landcover helpers =====================
 def _find_dea_first_last(catch_plots: Path) -> Optional[Tuple[Tuple[Path,int], Tuple[Path,int]]]:
-    """
-    Looks for files like 'Catchment_DEA_LandCover_YYYY.png' (any extension), returns
-    ((first_path, first_year), (last_path, last_year)) if found.
-    """
     hits = []
     for ext in ("png", "jpg", "jpeg"):
         hits.extend(catch_plots.glob(f"Catchment_DEA_LandCover_*.{ext}"))
@@ -454,6 +459,7 @@ def _find_dea_first_last(catch_plots: Path) -> Optional[Tuple[Tuple[Path,int], T
 def _compose_dea_two_panel(cfg: ReportConfig, catchment_name: str, catch_plots: Path) -> Optional[Path]:
     pair = _find_dea_first_last(catch_plots)
     if not pair:
+        _log("WARN", "DEA first/last year images not found for two-panel composition.")
         return None
     (p_first, y_first), (p_last, y_last) = pair
 
@@ -461,7 +467,6 @@ def _compose_dea_two_panel(cfg: ReportConfig, catchment_name: str, catch_plots: 
         img1 = imread(str(p_first))
         img2 = imread(str(p_last))
 
-        # One row, two columns – tighter and simpler
         fig, axes = plt.subplots(
             nrows=1,
             ncols=2,
@@ -469,58 +474,43 @@ def _compose_dea_two_panel(cfg: ReportConfig, catchment_name: str, catch_plots: 
             constrained_layout=False,
         )
 
-        # --- Left / right panels ---
         panels = [(axes[0], img1, y_first), (axes[1], img2, y_last)]
         for ax, img, y in panels:
             ax.imshow(img)
-            # one clear title per image
-            #ax.set_title(f"DEA Land Cover {y}",fontsize=11,fontweight="bold",pad=2,)
             ax.axis("off")
             ax.margins(x=0, y=0)
 
-        # If you want ONLY per-panel titles, comment this out:
-        # fig.suptitle(f"{catchment_name} – DEA Land Cover",
-        #              fontsize=12, fontweight="bold", y=0.97)
-
-        # Tight margins + very small horizontal gap
         fig.subplots_adjust(
             left=0.02,
             right=0.99,
             bottom=0.03,
-            top=0.92,   # leave room only for per-panel titles
-            wspace=0.001 # controls space between panels
+            top=0.92,
+            wspace=0.001
         )
 
         out_path = catch_plots / cfg.dea_two_panel_name.format(catchment=catchment_name)
         fig.savefig(out_path, dpi=cfg.default_dpi, bbox_inches="tight", pad_inches=0.03)
         plt.close(fig)
+        _log("OK", f"DEA two-panel image composed: {out_path}")
         return out_path
 
     except Exception as e:
-        print(f"[WARN] Could not compose DEA two-panel: {e}")
+        _log("WARN", f"Could not compose DEA two-panel: {e}")
         return None
 
 
-
 def _add_csv_table(doc: Document, csv_path: Path, round_to: int = 3) -> None:
-    """
-    Insert a CSV as a Word table.
-    - Keeps all columns.
-    - Rounds float-like values to `round_to` decimals for readability.
-    """
     try:
         df = pd.read_csv(csv_path)
         if df.empty:
             doc.add_paragraph(f"[{csv_path.name} is empty.]")
             return
 
-        # Round numeric columns for clean display (without altering the saved CSV)
         disp = df.copy()
         for c in disp.columns:
             if pd.api.types.is_numeric_dtype(disp[c]):
                 disp[c] = disp[c].round(round_to)
 
-        # Build table
         tbl = doc.add_table(rows=1, cols=len(disp.columns))
         hdr = tbl.rows[0].cells
         for i, c in enumerate(disp.columns):
@@ -570,7 +560,6 @@ def _site_le_panel(cfg: ReportConfig, row: pd.Series, site_id, out_dir: Path) ->
         if df.empty:
             ax.text(0.5, 0.5, "Data not available", ha="center", va="center", transform=ax.transAxes)
             continue
-        # FIX: removed stray extra closing parenthesis
         ax.plot(
             df["Year"], df["Value"],
             color="gray", linewidth=1, marker="o",
@@ -625,11 +614,8 @@ def _site_le_summary_table(row: pd.Series, cfg: ReportConfig) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-# ===================== NEW: Riparian NDVI helper functions =====================
+# ===================== Riparian NDVI helper functions =====================
 def _find_riparian_first_last(catch_plots: Path) -> Optional[Tuple[Tuple[Path, int], Tuple[Path, int]]]:
-    """
-    Find first and last 'Riparian_NDVI_by_StreamSegment_YYYY.png' images.
-    """
     hits = []
     for ext in ("png", "jpg", "jpeg"):
         hits.extend(catch_plots.glob(f"Riparian_NDVI_by_StreamSegment_*.{ext}"))
@@ -647,6 +633,7 @@ def _find_riparian_first_last(catch_plots: Path) -> Optional[Tuple[Tuple[Path, i
 def _compose_riparian_two_panel(cfg: ReportConfig, catchment_name: str, catch_plots: Path) -> Optional[Path]:
     pair = _find_riparian_first_last(catch_plots)
     if not pair:
+        _log("WARN", "Riparian NDVI first/last year images not found.")
         return None
 
     (p_first, y_first), (p_last, y_last) = pair
@@ -664,17 +651,8 @@ def _compose_riparian_two_panel(cfg: ReportConfig, catchment_name: str, catch_pl
         panels = [(axes[0], img1, y_first), (axes[1], img2, y_last)]
         for ax, img, y in panels:
             ax.imshow(img)
-            #ax.set_title(f"Riparian NDVI by Stream Segment {y}",fontsize=11,fontweight="bold",pad=2,)
             ax.axis("off")
             ax.margins(x=0, y=0)
-
-        # Again: comment this out if you *only* want per-panel titles
-        # fig.suptitle(
-        #     f"{catchment_name} – Riparian NDVI by Stream Segment",
-        #     fontsize=12,
-        #     fontweight="bold",
-        #     y=0.97,
-        # )
 
         fig.subplots_adjust(
             left=0.02,
@@ -687,24 +665,20 @@ def _compose_riparian_two_panel(cfg: ReportConfig, catchment_name: str, catch_pl
         out_path = catch_plots / f"{catchment_name}_Riparian_NDVI_StreamSegment_FirstLast.png"
         fig.savefig(out_path, dpi=cfg.default_dpi, bbox_inches="tight", pad_inches=0.03)
         plt.close(fig)
+        _log("OK", f"Riparian NDVI two-panel image composed: {out_path}")
         return out_path
     except Exception as e:
-        print(f"[WARN] Could not compose Riparian NDVI two-panel: {e}")
+        _log("WARN", f"Could not compose Riparian NDVI two-panel: {e}")
         return None
 
 
-# ===================== NEW: Site-level hydroclimate/SPI/SRI helpers =====================
+# ===================== Site-level hydroclimate/SPI/SRI helpers =====================
 def _load_site_daily(base: Path, cfg: ReportConfig, site_id: int) -> Tuple[pd.DataFrame, str]:
-    """
-    Load Site_{id}_historical_daily.csv.
-    Priority: <Sites Plots and Maps>/Site_{id}/Site_{id}_historical_daily.csv
-              <Sites Datasets>/Site_{id}/Site_{id}_historical_daily.csv
-    Returns (df, date_col_name) or (empty_df, 'Date') if not found.
-    """
     plots_csv = base / cfg.sites_plots_dir / f"Site_{site_id}" / f"Site_{site_id}_historical_daily.csv"
     data_csv  = base / cfg.sites_datasets_dir / f"Site_{site_id}" / f"Site_{site_id}_historical_daily.csv"
     path = _first_existing([plots_csv, data_csv])
     if not path:
+        _log("WARN", f"Site {site_id}: daily hydroclimate CSV not found.")
         return pd.DataFrame(), "Date"
 
     try:
@@ -712,14 +686,14 @@ def _load_site_daily(base: Path, cfg: ReportConfig, site_id: int) -> Tuple[pd.Da
         dcol = next((c for c in df.columns if c.lower().startswith("date")), "Date")
         df[dcol] = pd.to_datetime(df[dcol], dayfirst=True, errors="coerce")
         df = df.dropna(subset=[dcol]).sort_values(dcol)
-        # standardize numeric
         for c in ["Precipitation", "Min Temperature", "Max Temperature",
                   "Runoff", "Actual ET", "Upper Soil Moisture", "Deeper Soil Moisture"]:
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors="coerce")
+        _log("OK", f"Site {site_id}: daily hydroclimate CSV loaded.")
         return df, dcol
     except Exception as e:
-        print(f"[WARN] failed reading site daily CSV for Site {site_id}: {e}")
+        _log("WARN", f"Failed reading site daily CSV for Site {site_id}: {e}")
         return pd.DataFrame(), "Date"
 
 
@@ -785,12 +759,6 @@ def _compute_spi_sri_for_site(
     daily: pd.DataFrame,
     dcol: str,
 ) -> Tuple[Optional[Path], Optional[Path], Optional[pd.DataFrame], Optional[pd.DataFrame]]:
-    """
-    Compute Site-level SPI12 (from Precipitation) and SRI12 (from Runoff).
-    Outputs:
-      - PNGs to <Sites Plots and Maps>/Site_{id}/
-      - Also return annual mean SPI/SRI dataframes (for optional tabulation or checks).
-    """
     site_plot_dir = base / cfg.sites_plots_dir / f"Site_{site_id}"
     site_plot_dir.mkdir(parents=True, exist_ok=True)
 
@@ -805,7 +773,7 @@ def _compute_spi_sri_for_site(
                 sri_png if sri_png.exists() else None, None, None)
 
     try:
-        from standard_precip import spi  # optional dependency
+        from standard_precip import spi
         spi_calc = spi.SPI()
 
         if not daily.empty and ("Precipitation" in daily.columns):
@@ -845,7 +813,7 @@ def _compute_spi_sri_for_site(
                 sri_png, size=cfg.bar_ts_size, dpi=cfg.default_dpi)
 
     except Exception as e:
-        print(f"[WARN] Site {site_id} SPI/SRI step skipped: {e}")
+        _log("WARN", f"Site {site_id} SPI/SRI step skipped: {e}")
 
     return (spi_png if spi_png.exists() else None,
             sri_png if sri_png.exists() else None,
@@ -859,41 +827,32 @@ def _insert_site_plot_if_exists(doc: Document,
                                 caption: str,
                                 width_in: float = 6.5
 ) -> int:
-    """
-    If <site_plot_dir>/<filename> exists, insert it with a caption and return updated fig_counter.
-    Otherwise, leave a short note and return fig_counter unchanged.
-    """
     p = site_plot_dir / filename
     if p.exists():
         fig_counter += 1
         _insert_figure(doc, p, f"Figure {fig_counter}. {caption}", width_in=width_in)
+        _log("OK", f"Inserted plot into report: {p}")
     else:
         doc.add_paragraph(f"[{filename} not found in: {site_plot_dir}]")
+        _log("WARN", f"Missing site plot for report: {p}")
     return fig_counter
 
 
-# Files we’ll try to include for each site, in this order.
-# Use exact filenames as you generate them (including spaces & ampersands).
 SITE_PLOTS_SEQUENCE = [
-    # Riparian & LU time series
     ("Site_{sid}_Riparian_NDVI_Timeseries.png",
      "Site {sid} – Riparian NDVI time series"),
     ("Site_{sid}_LU_Percentages_OverTime.png",
      "Site {sid} – Land-use percentages over time"),
     ("Site_{sid}_LU_PercentagePointChange.png",
      "Site {sid} – Land-use percentage-point change"),
-
-    # Area-under-curve (AUC) summary plots
     ("Site_{sid}_AUC_NDVI_SDR.png",
      "Site {sid} – AUC summary for NDVI & SDR"),
     ("Site_{sid}_AUC_Bushfire.png",
      "Site {sid} – AUC summary for Bushfire exposure"),
-    ("Site_{sid}_RUSLE_SDR-RUSLE_Totals.png",
-     "Site {sid} – Total RUSLE and SDR-RUSLE (t/yr)"),
+    ("Site_{sid}_RUSLE_SDR-RUSLE_TimeSeries.png",
+     "Site {sid} – RUSLE and SDR-RUSLE (t/ha/yr)"),
     ("Site_{sid}_Road_AUC_TimeSeries.png",
      "Site {sid} – Roads: AUC time-series"),
-
-    # Land-use class specific AUCs
     ("Site_{sid}_LU_Water_wetlands_AUC_TimeSeries.png","Site {sid} – AUC: Water & wetlands"),
     ("Site_{sid}_LU_Native_forests_native_grazing_AUC_TimeSeries.png","Site {sid} – AUC: Native forests & native grazing"),
     ("Site_{sid}_LU_Conservation_minimal_use_AUC_TimeSeries.png","Site {sid} – AUC: Conservation & minimal use"),
@@ -906,65 +865,48 @@ SITE_PLOTS_SEQUENCE = [
     ("Site_{sid}_LU_Transport_communication_AUC_TimeSeries.png","Site {sid} – AUC: Transport & communication"),
 ]
 
+
 def _site_location_map(
     cfg: ReportConfig,
     base: Path,
     catch_gdf: Optional[gpd.GeoDataFrame],
-    site_geom,                     # <- a Shapely geometry (Polygon/MultiPolygon/Point/LineString)
+    site_geom,
     sid: int,
-    sites_crs=None                 # <- CRS of the sites layer (e.g., sites_gdf.crs)
+    sites_crs=None
 ) -> Optional[Path]:
-    """
-    Create a simple location map for a site:
-    - catchment boundary in black outline (if available)
-    - site polygon/point/line overlaid in red
-    - saved to <Sites Plots and Maps>/Site_{sid}/Site_{sid}_Location.png
-
-    NOTE:
-        Shapely geometries do NOT have .crs. We must pass the CRS separately (sites_crs).
-    """
     try:
-        # ---- 0) Validate geometry
         if site_geom is None or (hasattr(site_geom, "is_empty") and site_geom.is_empty):
             return None
 
-        # ---- 1) Build a GeoDataFrame for the single site geometry with the provided CRS
         site_gdf = gpd.GeoDataFrame({"Site_id": [sid]}, geometry=[site_geom], crs=sites_crs)
 
-        # ---- 2) Align CRS to the catchment's CRS (if both known)
         if catch_gdf is not None and catch_gdf.crs is not None:
             if site_gdf.crs is None:
-                # If site CRS is unknown but catchment CRS exists, assume the site is already in that CRS
                 site_gdf = site_gdf.set_crs(catch_gdf.crs, allow_override=True)
             elif str(site_gdf.crs) != str(catch_gdf.crs):
                 site_gdf = site_gdf.to_crs(catch_gdf.crs)
 
-        # ---- 3) Output path
         out_dir = base / cfg.sites_plots_dir / f"Site_{sid}"
         out_dir.mkdir(parents=True, exist_ok=True)
         out_png = out_dir / f"Site_{sid}_Location.png"
 
-        # ---- 4) Figure
-        fig, ax = plt.subplots(figsize=(6.8, 6.0))  # compact, Word-friendly
+        fig, ax = plt.subplots(figsize=(6.8, 6.0))
 
-        # 4a) Plot catchment outline if available
         if catch_gdf is not None and not catch_gdf.empty:
             try:
                 catch_gdf.boundary.plot(ax=ax, color="black", linewidth=1.0, zorder=1)
             except Exception:
                 catch_gdf.plot(ax=ax, facecolor="none", edgecolor="black", linewidth=1.0, zorder=1)
 
-        # 4b) Plot site geometry (polygon/point/line) in crimson
         gtype = site_gdf.geom_type.iloc[0] if not site_gdf.empty else ""
         if gtype in {"Polygon", "MultiPolygon"}:
             site_gdf.boundary.plot(ax=ax, color="crimson", linewidth=1.8, zorder=3)
             site_gdf.plot(ax=ax, facecolor="none", edgecolor="crimson", linewidth=1.8, zorder=3)
         elif gtype in {"LineString", "MultiLineString"}:
             site_gdf.plot(ax=ax, color="crimson", linewidth=2.0, zorder=3)
-        else:  # Points, etc.
+        else:
             site_gdf.plot(ax=ax, color="crimson", markersize=35, zorder=3)
 
-        # ---- 5) Style
         ax.set_title(f"Site {sid} – Location within Catchment", fontsize=11, fontweight="bold", pad=6)
         ax.set_xlabel("Longitude", fontsize=10, fontweight="bold")
         ax.set_ylabel("Latitude", fontsize=10, fontweight="bold")
@@ -973,12 +915,10 @@ def _site_location_map(
         ax.tick_params(axis="both", labelsize=10)
         ax.grid(True, linestyle="--", alpha=0.6)
 
-        # ---- 6) Extent: prefer full catchment for context; fallback to site buffer
         if catch_gdf is not None and not catch_gdf.empty:
             minx, miny, maxx, maxy = catch_gdf.total_bounds
         else:
             minx, miny, maxx, maxy = site_gdf.total_bounds
-            # Add a small buffer for nicer framing if only the site is available
             dx = (maxx - minx) or 1.0
             dy = (maxy - miny) or 1.0
             minx, maxx = minx - 0.1 * dx, maxx + 0.1 * dx
@@ -992,39 +932,41 @@ def _site_location_map(
         return out_png
 
     except Exception as e:
-        print(f"[WARN] Site {sid} location map failed: {e}")
+        _log("WARN", f"Site {sid} location map failed: {e}")
         return None
+
 
 # ===================== document assembly =====================
 def build_report(cfg: ReportConfig) -> Path:
     catch_path = Path(cfg.catchment_path)
     catchment_name = _catchment_name(catch_path)
     base = Path(cfg.chm_workspace) / catchment_name
-    # Load catchment outline once
+
     catch_gdf = None
     try:
         catch_gdf = gpd.read_file(cfg.catchment_path)
+        _log("OK", f"Catchment boundary loaded: {cfg.catchment_path}")
     except Exception as e:
-        print(f"[WARN] Could not read catchment_path: {e}")
+        _log("WARN", f"Could not read catchment_path: {e}")
 
-
-    # scaffold
     catch_plots = base / cfg.catch_plots_dir
     catch_datasets = base / cfg.catch_datasets_dir
     sites_datasets = base / cfg.sites_datasets_dir
     sites_plots = base / cfg.sites_plots_dir
     _ensure_dirs([base, catch_plots, catch_datasets, sites_datasets, sites_plots])
 
-    # 1) Load daily
+    _log("INFO", "Loading historical hydroclimate data for report...")
     daily, dcol = _load_historical(cfg, base, catchment_name)
 
-    # 2) SPI/SRI
+    _log("INFO", "Computing SPI/SRI products for report...")
     spi_png, sri_png = _compute_spi_sri_from_daily(cfg, base, catchment_name, daily, dcol)
 
-    # 3) Annual aggregation (with Mean Temperature)
     annual = _annual_from_daily(daily, dcol)
+    if annual.empty:
+        _log("WARN", "Annual hydroclimate dataframe is empty.")
+    else:
+        _log("OK", "Annual hydroclimate dataframe prepared.")
 
-    # 4) Summary table
     summary_rows = []
     for var in ["Precipitation", "Mean Temperature", "Runoff", "Actual ET",
                 "Upper Soil Moisture", "Deeper Soil Moisture",
@@ -1042,7 +984,6 @@ def build_report(cfg: ReportConfig) -> Path:
             })
     summary_df = pd.DataFrame(summary_rows)
 
-    # 5) DOCX
     doc = Document()
     title = doc.add_heading(level=0)
     run = title.add_run(f"This is an automated report for {catchment_name} catchment health condition")
@@ -1051,84 +992,93 @@ def build_report(cfg: ReportConfig) -> Path:
 
     fig_counter = 0
 
-    # 5a) Basemap
     basemap = _glob_first(catch_plots, cfg.basemap_patterns)
     if basemap and basemap.exists():
         fig_counter += 1
         _insert_figure(doc, basemap, f"Figure {fig_counter}. {catchment_name} and the location of sites.", width_in=4.5)
+        _log("OK", f"Added basemap figure: {basemap}")
     else:
         doc.add_paragraph(f"[Catchment basemap not found in: {catch_plots}]")
+        _log("WARN", f"Catchment basemap missing in: {catch_plots}")
 
-    # 5b) Land use (existing grouped)
     lu_png = _glob_first(catch_plots, cfg.landuse_patterns)
     if lu_png and lu_png.exists():
         fig_counter += 1
         _insert_figure(doc, lu_png, f"Figure {fig_counter}. {catchment_name} land use.", width_in=6.5)
+        _log("OK", f"Added land use figure: {lu_png}")
     else:
         doc.add_paragraph(f"[Grouped land-use image not found in: {catch_plots}]")
+        _log("WARN", f"Grouped land-use image missing in: {catch_plots}")
 
-    # 5c) DEA Land Cover 2-row panel (first & last year) — insert right after Figure 2
     dea_two = _compose_dea_two_panel(cfg, catchment_name, catch_plots)
     if dea_two and dea_two.exists():
         fig_counter += 1
         _insert_figure(doc, dea_two,
                        f"Figure {fig_counter}. {catchment_name} DEA Land Cover.",
                        width_in=6.5)
+        _log("OK", f"Added DEA two-panel figure: {dea_two}")
     else:
         doc.add_paragraph("[DEA Land Cover first/last panel not generated (files not found).]")
+        _log("WARN", "DEA two-panel figure missing.")
 
-    # 5d) Catchment_LU_Percentages_OverTime.png
     lu_pct_over = catch_plots / cfg.lu_pct_overtime_name
     if lu_pct_over.exists():
         fig_counter += 1
         _insert_figure(doc, lu_pct_over,
                        f"Figure {fig_counter}. {catchment_name} – Land-use percentages over time.", width_in=6.5)
+        _log("OK", f"Added LU percentages over time figure: {lu_pct_over}")
     else:
         doc.add_paragraph(f"[{cfg.lu_pct_overtime_name} not found in: {catch_plots}]")
+        _log("WARN", f"Missing LU percentages over time figure: {lu_pct_over}")
 
-    # 5e) Catchment_LU_PercentagePointChange.png
     lu_pct_change = catch_plots / cfg.lu_pct_pointchange_name
     if lu_pct_change.exists():
         fig_counter += 1
         _insert_figure(doc, lu_pct_change,
                        f"Figure {fig_counter}. {catchment_name} – Land-use percentage-point change.", width_in=6.5)
+        _log("OK", f"Added LU percentage-point change figure: {lu_pct_change}")
     else:
         doc.add_paragraph(f"[{cfg.lu_pct_pointchange_name} not found in: {catch_plots}]")
+        _log("WARN", f"Missing LU percentage-point change figure: {lu_pct_change}")
 
-    # 5f-new) Land-use percentages table (from CSV), placed right after Figure 5.
     landuse_output = catch_datasets / "Landuse" / "DEA Landcover"
     lu_pct_csv = landuse_output / "Catchment_LU_Percentages.csv"
-    doc.add_paragraph("")  # small spacer
+    doc.add_paragraph("")
     doc.add_heading(f"{catchment_name} – Land-use percentages (table)", level=2)
     if lu_pct_csv.exists():
         _add_csv_table(doc, lu_pct_csv, round_to=3)
+        _log("OK", f"Added LU percentages table: {lu_pct_csv}")
     else:
         doc.add_paragraph(f"[Catchment_LU_Percentages.csv not found at: {lu_pct_csv}]")
+        _log("WARN", f"Missing LU percentages table: {lu_pct_csv}")
 
-    # === NEW SECTION: Riparian NDVI by Stream Segment + Mean NDVI Timeseries ===
     riparian_two_panel = _compose_riparian_two_panel(cfg, catchment_name, catch_plots)
     if riparian_two_panel and riparian_two_panel.exists():
         fig_counter += 1
-        _insert_figure(doc, riparian_two_panel,f"Figure {fig_counter}. {catchment_name} – Riparian NDVI by Stream Segment.",width_in=6.5)
+        _insert_figure(doc, riparian_two_panel, f"Figure {fig_counter}. {catchment_name} – Riparian NDVI by Stream Segment.", width_in=6.5)
+        _log("OK", f"Added riparian two-panel figure: {riparian_two_panel}")
     else:
         doc.add_paragraph("[Riparian NDVI by Stream Segment images not found.]")
+        _log("WARN", "Riparian NDVI by Stream Segment images missing.")
 
     riparian_timeseries = catch_plots / "Riparian_NDVI_Mean_by_StreamOrder_Timeseries.png"
     if riparian_timeseries.exists():
         fig_counter += 1
-        _insert_figure( doc, riparian_timeseries, f"Figure {fig_counter}. {catchment_name} – Riparian NDVI mean by stream order over time.",width_in=6.5)
+        _insert_figure(doc, riparian_timeseries, f"Figure {fig_counter}. {catchment_name} – Riparian NDVI mean by stream order over time.", width_in=6.5)
+        _log("OK", f"Added riparian timeseries figure: {riparian_timeseries}")
     else:
         doc.add_paragraph("[Riparian NDVI mean by stream order timeseries missing.]")
+        _log("WARN", f"Missing riparian timeseries figure: {riparian_timeseries}")
 
-    # 5f) Hydro TS (with Mean Temperature)
     hydro_png = _hydro_ts_plot(cfg, base, catchment_name, annual)
     if hydro_png and hydro_png.exists():
         fig_counter += 1
-        _insert_figure(doc, hydro_png,f"Figure {fig_counter}. Annual hydroclimate time series for {catchment_name}.", width_in=6.5)
+        _insert_figure(doc, hydro_png, f"Figure {fig_counter}. Annual hydroclimate time series for {catchment_name}.", width_in=6.5)
+        _log("OK", f"Added hydroclimate timeseries figure: {hydro_png}")
     else:
         doc.add_paragraph("[Hydroclimate time series not generated.]")
+        _log("WARN", "Hydroclimate time series figure missing.")
 
-    # 5g) Summary table
     doc.add_heading(f"Statistical summary for annual hydroclimate variables across {catchment_name}", level=2)
     cols = ["Variable", "Mean", "Median", "Min", "Max", "Std"]
     if not summary_df.empty:
@@ -1139,89 +1089,106 @@ def build_report(cfg: ReportConfig) -> Path:
             row_cells = tbl.add_row().cells
             for i, c in enumerate(cols):
                 row_cells[i].text = _fmt_float(r.get(c, np.nan))
+        _log("OK", "Added catchment hydroclimate summary table.")
     else:
         doc.add_paragraph("[No annual summary could be computed (missing inputs).]")
+        _log("WARN", "Catchment hydroclimate summary table could not be generated.")
 
-    # 5h) SPI/SRI figs
     if spi_png and spi_png.exists():
         fig_counter += 1
         _insert_figure(doc, spi_png, f"Figure {fig_counter}. {catchment_name} SPI-12 (annual mean of 12-month SPI).")
+        _log("OK", f"Added SPI12 figure: {spi_png}")
     else:
         doc.add_paragraph("[SPI12 figure not generated.]")
+        _log("WARN", "SPI12 figure missing.")
 
     if sri_png and sri_png.exists():
         fig_counter += 1
         _insert_figure(doc, sri_png, f"Figure {fig_counter}. {catchment_name} SRI-12 (annual mean of 12-month SRI).")
+        _log("OK", f"Added SRI12 figure: {sri_png}")
     else:
         doc.add_paragraph("[SRI12 figure not generated.]")
+        _log("WARN", "SRI12 figure missing.")
 
-    # 5i) RUSLE and SDR-RUSLE Totals plot (after Figure 10)
-    rusle_sdr_totals = catch_plots / f"{catchment_name}_RUSLE_SDR-RUSLE_Totals.png"
-    if rusle_sdr_totals.exists():
+    rusle_sdr_means = catch_plots / f"{catchment_name}_RUSLE_SDR-RUSLE_TimeSeries.png"
+    if rusle_sdr_means.exists():
         fig_counter += 1
-        _insert_figure(doc,rusle_sdr_totals,f"Figure {fig_counter}. {catchment_name} – Total RUSLE and SDR-RUSLE (t/yr).",width_in=6.5,)
+        _insert_figure(doc, rusle_sdr_means, f"Figure {fig_counter}. {catchment_name} – RUSLE and SDR-RUSLE (t/ha/yr).", width_in=6.5)
+        _log("OK", f"Added RUSLE/SDR-RUSLE figure: {rusle_sdr_means}")
     else:
-        doc.add_paragraph(f"[{rusle_sdr_totals.name} not found in: {catch_plots}]")
+        doc.add_paragraph(f"[{rusle_sdr_means.name} not found in: {catch_plots}]")
+        _log("WARN", f"Missing RUSLE/SDR-RUSLE figure: {rusle_sdr_means}")
 
-    # 6) Sites section (enhanced with Site-level hydroclimate, summary, SPI, SRI)
     doc.add_heading("Sites", level=1)
 
     site_ids: List[str] = []
-    gpkg_candidates = [sites_datasets / cfg.all_sites_gpkg_name.format(catchment=catchment_name),
-                       sites_datasets / f"{catchment_name} Sites Data.gpkg",
-                       sites_datasets / "All Sites Data.gpkg",]
+    gpkg_candidates = [
+        sites_datasets / cfg.all_sites_gpkg_name.format(catchment=catchment_name),
+        sites_datasets / f"{catchment_name} Sites Data.gpkg",
+        sites_datasets / "All Sites Data.gpkg",
+    ]
     gpkg_path = _first_existing(gpkg_candidates)
     sites_gdf = None
+
     if gpkg_path and gpkg_path.exists():
         try:
             sites_gdf = gpd.read_file(gpkg_path)
             if "Site_id" in sites_gdf.columns:
-                # keep raw IDs as strings (works for 1, 2, 3 and DNE6, E601, ...)
                 site_ids = sorted({str(v) for v in sites_gdf["Site_id"].dropna().unique()})
+            _log("OK", f"Sites GPKG loaded for report: {gpkg_path}")
         except Exception as e:
-            print(f"[WARN] could not read sites GPKG: {e}")
+            _log("WARN", f"Could not read sites GPKG: {e}")
+            sites_gdf = None
+    else:
+        _log("WARN", "Sites GPKG not found; report will fall back to site folders if available.")
 
     if not site_ids and sites_plots.exists():
         for p in (p for p in sites_plots.iterdir() if p.is_dir()):
             if p.name.startswith("Site_"):
                 site_ids.append(p.name.replace("Site_", ""))
-    
+        if site_ids:
+            _log("OK", "Recovered site IDs from site plot folders.")
+
     site_ids = sorted(set(site_ids))
+
+    if not site_ids:
+        doc.add_paragraph("[No site IDs could be found. Site section skipped.]")
+        _log("WARN", "No site IDs found. Site section skipped.")
 
     for sid in site_ids:
         doc.add_heading(f"Site {sid}", level=2)
-        # --- First figure for each site: location map (site polygon over catchment) ---
+
         if catch_gdf is not None and sites_gdf is not None and not sites_gdf.empty and ("Site_id" in sites_gdf.columns):
             row_match = sites_gdf[sites_gdf["Site_id"].astype(str) == str(sid)]
             if not row_match.empty:
                 site_row = row_match.iloc[0]
-                # Pass the geometry AND the CRS of the sites layer (sites_gdf.crs). Geometry itself has no CRS.
                 loc_png = _site_location_map(
                     cfg, base, catch_gdf,
-                    site_row.geometry,  # Shapely geometry
+                    site_row.geometry,
                     sid,
                     getattr(sites_gdf, "crs", None)
                 )
                 if loc_png and loc_png.exists():
                     fig_counter += 1
                     _insert_figure(doc, loc_png, f"Figure {fig_counter}. Site {sid} location within {catchment_name}.", width_in=6.0)
+                    _log("OK", f"Added site location map: {loc_png}")
                 else:
                     doc.add_paragraph(f"[Site {sid}: location map not generated.]")
+                    _log("WARN", f"Site {sid}: location map not generated.")
         else:
             doc.add_paragraph("[Catchment or sites layer missing – cannot draw site location maps.]")
+            _log("WARN", f"Site {sid}: catchment or sites layer missing for location map.")
 
-
-        site_plot_dir = sites_plots / f"Site_{sid}"
-        # monitoring plot
         site_plot_dir = sites_plots / f"Site_{sid}"
         plot_path = _glob_first(site_plot_dir, cfg.monitoring_plot_patterns) if site_plot_dir.exists() else None
         if plot_path and plot_path.exists():
             fig_counter += 1
             _insert_figure(doc, plot_path, f"Figure {fig_counter}. Monitoring data for Site {sid}.", width_in=6.5)
+            _log("OK", f"Added monitoring plot for Site {sid}: {plot_path}")
         else:
             doc.add_paragraph(f"[Monitoring plot not found for Site {sid}. Looked in: {site_plot_dir}]")
+            _log("WARN", f"Monitoring plot missing for Site {sid} in: {site_plot_dir}")
 
-        # monitoring summary table
         site_data_dir = sites_datasets / f"Site_{sid}"
         site_summary_csv = None
         if site_data_dir.exists():
@@ -1247,12 +1214,18 @@ def build_report(cfg: ReportConfig) -> Path:
                                 cells[i].text = "" if not np.isfinite(val) else f"{val:.3g}"
                             else:
                                 cells[i].text = "" if pd.isna(val) else str(val)
+                    _log("OK", f"Added monitoring summary table for Site {sid}: {site_summary_csv}")
+                else:
+                    doc.add_paragraph(f"[Monitoring summary table for Site {sid} is empty.]")
+                    _log("WARN", f"Monitoring summary CSV empty for Site {sid}: {site_summary_csv}")
             except Exception as e:
                 doc.add_paragraph(f"[Could not add monitoring summary table for Site {sid}: {e}]")
+                _log("WARN", f"Could not add monitoring summary table for Site {sid}: {e}")
+        else:
+            _log("WARN", f"Monitoring summary CSV missing for Site {sid}.")
 
-        # land/erosion panel & summary
         if sites_gdf is not None and not sites_gdf.empty and ("Site_id" in sites_gdf.columns):
-            row_match = sites_gdf[pd.to_numeric(sites_gdf["Site_id"], errors="coerce") == sid]
+            row_match = sites_gdf[sites_gdf["Site_id"].astype(str) == str(sid)]
             if not row_match.empty:
                 row = row_match.iloc[0]
                 le_png = _site_le_panel(cfg, row, sid, site_plot_dir)
@@ -1263,63 +1236,41 @@ def build_report(cfg: ReportConfig) -> Path:
                         f"Figure {fig_counter}. NDVI, C-Factor, RUSLE, and SDR-RUSLE ({cfg.le_year_min}–{cfg.le_year_max}) for Site {sid}.",
                         width_in=6.5,
                     )
-                """
-                try:
-                    le_df = _site_le_summary_table(row, cfg)
-                    if not le_df.empty:
-                        doc.add_paragraph("")
-                        doc.add_heading(f"NDVI / C-Factor / RUSLE / SDR-RUSLE summary for Site {sid}", level=3)
-                        cols_le = ["Variable", "Start", "End", "Mean", "Median", "Min", "Max", "Std"]
-                        tbl = doc.add_table(rows=1, cols=len(cols_le))
-                        hdr = tbl.rows[0].cells
-                        for i, c in enumerate(cols_le): hdr[i].text = c
-                        for _, r2 in le_df.iterrows():
-                            cells = tbl.add_row().cells
-                            for i, c in enumerate(cols_le):
-                                v = r2.get(c, np.nan)
-                                if isinstance(v, (float, np.floating)):
-                                    cells[i].text = "" if not np.isfinite(v) else f"{v:.3g}"
-                                else:
-                                    cells[i].text = "" if pd.isna(v) else str(v)
-                except Exception as e:
-                    doc.add_paragraph(f"[Could not add land/erosion summary for Site {sid}: {e}]")
-                 """
-        # === NEW: Additional per-site figures (Riparian NDVI, LU, AUCs) ===
+                    _log("OK", f"Added land/erosion panel for Site {sid}: {le_png}")
+                else:
+                    _log("WARN", f"Land/erosion panel not generated for Site {sid}.")
+
         doc.add_heading(f"Additional figures for Site {sid}", level=3)
-        # We'll remember when we've just inserted the LU-over-time plot
-        just_inserted_lu_overtime = False  # retained for future logic
         site_lu_pct_csv_name = f"Site_{sid}_LU_Percentages.csv"
         site_data_dir = sites_plots / f"Site_{sid}"
 
         for fname_tpl, cap_tpl in SITE_PLOTS_SEQUENCE:
             filename = fname_tpl.format(sid=sid)
-            caption  = cap_tpl.format(sid=sid)
+            caption = cap_tpl.format(sid=sid)
 
-            # Insert the figure if it exists
             prev_fig_counter = fig_counter
             fig_counter = _insert_site_plot_if_exists(
                 doc, site_plot_dir, filename, fig_counter, caption, width_in=6.5
             )
 
-            # If we just inserted the LU percentages over time figure, insert the matching CSV table right after it
             if (
                 prev_fig_counter != fig_counter
                 and fname_tpl == "Site_{sid}_LU_Percentages_OverTime.png"
             ):
                 lu_pct_csv_path = site_data_dir / site_lu_pct_csv_name
-                doc.add_paragraph("")  # small spacer
+                doc.add_paragraph("")
                 doc.add_heading(f"Site {sid} – Land-use percentages table", level=4)
                 if lu_pct_csv_path.exists():
                     _add_csv_table(doc, lu_pct_csv_path, round_to=3)
+                    _log("OK", f"Added LU percentages table for Site {sid}: {lu_pct_csv_path}")
                 else:
                     doc.add_paragraph(f"[{site_lu_pct_csv_name} not found at: {lu_pct_csv_path}]")
+                    _log("WARN", f"Missing LU percentages table for Site {sid}: {lu_pct_csv_path}")
 
-        # === NEW: Site-level hydroclimate (from Site_{sid}_historical_daily.csv) ===
         site_daily, dcol_site = _load_site_daily(base, cfg, sid)
         if not site_daily.empty:
             site_annual = _annual_from_daily(site_daily, dcol_site)
 
-            # Site time-series figure (same style as catchment)
             site_hydro_png = _site_hydro_ts_plot(cfg, base, sid, site_annual)
             if site_hydro_png and site_hydro_png.exists():
                 fig_counter += 1
@@ -1328,10 +1279,11 @@ def build_report(cfg: ReportConfig) -> Path:
                     f"Figure {fig_counter}. Annual hydroclimate time series for Site {sid}.",
                     width_in=6.5
                 )
+                _log("OK", f"Added site hydroclimate plot for Site {sid}: {site_hydro_png}")
             else:
                 doc.add_paragraph(f"[Site {sid}: hydroclimate time series not generated.]")
+                _log("WARN", f"Site {sid}: hydroclimate time series not generated.")
 
-            # Site summary table (same columns set as catchment)
             doc.add_heading(f"Statistical summary for annual hydroclimate variables – Site {sid}", level=3)
             cols = ["Variable", "Mean", "Median", "Min", "Max", "Std"]
             rows = []
@@ -1358,30 +1310,35 @@ def build_report(cfg: ReportConfig) -> Path:
                     rc = tbl.add_row().cells
                     for i, c in enumerate(cols):
                         rc[i].text = _fmt_float(rsum.get(c, np.nan))
+                _log("OK", f"Added site hydroclimate summary table for Site {sid}.")
             else:
                 doc.add_paragraph(f"[Site {sid}: no annual summary computed (missing inputs).]")
+                _log("WARN", f"Site {sid}: no annual hydroclimate summary computed.")
 
-            # Site SPI/SRI (SPI from Precip, SRI from Runoff)
             spi_site_png, sri_site_png, _spi_year, _sri_year = _compute_spi_sri_for_site(cfg, base, sid, site_daily, dcol_site)
             if spi_site_png and spi_site_png.exists():
                 fig_counter += 1
                 _insert_figure(doc, spi_site_png, f"Figure {fig_counter}. Site {sid} SPI-12 (annual mean of 12-month SPI).")
+                _log("OK", f"Added Site {sid} SPI12 figure: {spi_site_png}")
             else:
                 doc.add_paragraph(f"[Site {sid}: SPI12 figure not generated.]")
+                _log("WARN", f"Site {sid}: SPI12 figure missing.")
 
             if sri_site_png and sri_site_png.exists():
                 fig_counter += 1
                 _insert_figure(doc, sri_site_png, f"Figure {fig_counter}. Site {sid} SRI-12 (annual mean of 12-month SRI).")
+                _log("OK", f"Added Site {sid} SRI12 figure: {sri_site_png}")
             else:
                 doc.add_paragraph(f"[Site {sid}: SRI12 figure not generated.]")
+                _log("WARN", f"Site {sid}: SRI12 figure missing.")
         else:
             doc.add_paragraph(f"[Site {sid}: daily hydroclimate CSV not found.]")
+            _log("WARN", f"Site {sid}: daily hydroclimate CSV not found.")
 
-    # 7) Save DOCX
     out_docx = base / f"{catchment_name}_Automated_Report.docx"
     try:
         doc.save(out_docx)
-        print(f"[OK] Report written: {out_docx}")
+        _log("OK", f"Report written: {out_docx}")
     except PermissionError:
-        print(f"[ERR] Could not write '{out_docx}'. Please close it in Word and run again.")
+        _log("ERR", f"Could not write '{out_docx}'. Please close it in Word and run again.")
     return out_docx

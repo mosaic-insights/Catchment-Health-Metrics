@@ -15,7 +15,7 @@ import os
 import re
 import gc
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, Any
 
 # --- Scientific ---
 import numpy as np
@@ -27,6 +27,8 @@ import geopandas as gpd
 import rasterio as rio
 import rioxarray as rxr
 from rasterio.mask import mask as rio_mask
+from rasterio.warp import calculate_default_transform, reproject, Resampling
+from rasterio.transform import array_bounds
 from shapely.geometry import Point
 import fiona  # only used for fiona.remove(...)
 
@@ -36,14 +38,60 @@ import odc.stac
 
 # --- Plotting ---
 import matplotlib.pyplot as plt
-from matplotlib.ticker import FormatStrFormatter, MaxNLocator  # <-- add MaxNLocator here
+from matplotlib.ticker import FormatStrFormatter, MaxNLocator
 from matplotlib.lines import Line2D
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+
 
 # ============================== Utilities ==============================
 
 def _ensure_dirs(paths: Iterable[str]) -> None:
+    """Create folders if they do not exist."""
     for p in paths:
         os.makedirs(p, exist_ok=True)
+
+
+def _log(status: str, message: str) -> None:
+    """Simple consistent console logger."""
+    print(f"[{status}] {message}")
+
+
+def _folder_label(path: str) -> str:
+    """Return the last folder/file label for cleaner logging."""
+    return os.path.basename(os.path.normpath(path))
+
+
+def _existing_or_none(path: str) -> Optional[str]:
+    """Return path only if it exists on disk, otherwise None."""
+    return path if os.path.exists(path) else None
+
+
+def _log_folder_summary(
+    catchment_folder: str,
+    catch_datasets: str,
+    catch_plots: str,
+    veg_folder: str,
+    sites_datasets: str,
+    sites_plots: str,
+) -> None:
+    """Print full output folder structure once at the start."""
+    _log("OK", "Output folders are ready.")
+    _log("INFO", "Created/using output folders:")
+    _log("INFO", f"  Catchment folder       : {catchment_folder}")
+    _log("INFO", f"  Catchment datasets     : {catch_datasets}")
+    _log("INFO", f"  Catchment plots/maps   : {catch_plots}")
+    _log("INFO", f"  Vegetation             : {veg_folder}")
+    _log("INFO", f"  Sites datasets         : {sites_datasets}")
+    _log("INFO", f"  Sites plots/maps       : {sites_plots}")
+
+
+def _add_matched_colorbar(fig, ax, im, label: str, size: str = "4.5%", pad: float = 0.08):
+    """Add a colorbar whose height matches the plotted axes."""
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size=size, pad=pad)
+    cbar = fig.colorbar(im, cax=cax)
+    cbar.set_label(label, fontsize=9)
+    return cbar
 
 
 def _years_from_interval(datetime_str: str) -> List[int]:
@@ -59,8 +107,10 @@ def _both_exist(a: str, b: str) -> bool:
 
 def _all_annual_outputs_exist(annual_ndvi_dir: str, annual_c_dir: str, years: List[int]) -> bool:
     for y in years:
-        if not _both_exist(os.path.join(annual_ndvi_dir, f"NDVI_{y}.tif"),
-                           os.path.join(annual_c_dir,    f"C_Factor_{y}.tif")):
+        if not _both_exist(
+            os.path.join(annual_ndvi_dir, f"NDVI_{y}.tif"),
+            os.path.join(annual_c_dir, f"C_Factor_{y}.tif")
+        ):
             return False
     return True
 
@@ -93,117 +143,408 @@ def _masked_mean(src: rio.DatasetReader, geom) -> float:
     except Exception:
         return np.nan
 
-
-def _plot_riparian_map_for_year(
-    ST_gdf: gpd.GeoDataFrame,
-    catch_gdf: gpd.GeoDataFrame,
-    sites_path: str,
-    year: int,
-    out_png: str,
-    sites_target_crs: Optional[object] = None,  # <-- NEW: ensure sites are first coerced to this CRS
+def _get_adaptive_figsize_from_bounds(
+    bounds,
+    base_size=6.0,
+    min_size=4.0,
+    max_size=12.0,
+    scale_factor=0.00005  # controls how much extent affects size
 ):
     """
-    Plot riparian NDVI by stream segment for a single year, with fixed bins and legend.
-    Expects a column on ST_gdf named 'Riparian NDVI - {year}'.
+    Adaptive figure size based on both shape AND spatial extent.
     """
-    col = f"Riparian NDVI - {year}"
-    if col not in ST_gdf.columns:
-        print(f"[WARN] {_plot_riparian_map_for_year.__name__}: '{col}' not found on streams.")
+
+    minx, miny, maxx, maxy = bounds
+    width = max(maxx - minx, 1e-9)
+    height = max(maxy - miny, 1e-9)
+
+    aspect = width / height
+
+    # 🔥 NEW: scale by spatial size
+    scale = max(width, height) * scale_factor
+
+    if aspect >= 1:
+        fig_w = base_size * aspect * (1 + scale)
+        fig_h = base_size * (1 + scale)
+    else:
+        fig_w = base_size * (1 + scale)
+        fig_h = base_size / aspect * (1 + scale)
+
+    fig_w = min(max(fig_w, min_size), max_size)
+    fig_h = min(max(fig_h, min_size), max_size)
+
+    return fig_w, fig_h
+
+def _plot_valid_raster_outline(
+    ax,
+    data: np.ndarray,
+    extent: Tuple[float, float, float, float],
+    color: str = "black",
+    linewidth: float = 1.2
+) -> None:
+    """
+    Plot the outline of valid (non-NaN) raster cells so the boundary
+    matches the displayed raster pixels more accurately.
+    """
+    valid_mask = np.isfinite(data).astype(np.uint8)
+
+    if valid_mask.max() == 0:
         return
 
-    # Fixed class breaks & colors (match the old style)
-    breaks = [-np.inf, 0.0, 0.2, 0.4, 0.6, 0.8, np.inf]
-    colors = ["#d7191c", "#fdae61", "#ffea00", "#a6d96a", "#1a9641", "#00441b"]
-    labels = ["≤ 0.0", "0.0–0.2", "0.2–0.4", "0.4–0.6", "0.6–0.8", "> 0.8"]
+    xmin, xmax, ymin, ymax = extent
+    nrows, ncols = valid_mask.shape
 
-    # Plot in Web Mercator for consistency
-    web = 3857
-    streams_web = ST_gdf.to_crs(epsg=web)
-    catch_web   = catch_gdf.to_crs(epsg=web)
+    xres = (xmax - xmin) / ncols
+    yres = (ymax - ymin) / nrows
 
-    # Bin values
-    vals = pd.to_numeric(streams_web[col], errors="coerce")
-    cats = pd.cut(vals, breaks, right=True, labels=labels, include_lowest=True)
-    streams_web = streams_web.assign(__class=cats)
+    xs = np.linspace(xmin + xres / 2, xmax - xres / 2, ncols)
+    ys = np.linspace(ymax - yres / 2, ymin + yres / 2, nrows)  # origin='upper'
 
-    # Load sites (optional) → coerce to target first if provided, then to web for plotting
-    try:
-        sites = gpd.read_file(sites_path)
-        if sites_target_crs is not None:
-            if sites.crs is None:
-                sites = sites.set_crs(sites_target_crs)
-            elif sites.crs != sites_target_crs:
-                sites = sites.to_crs(sites_target_crs)
-        sites_web = sites.to_crs(epsg=web) if not sites.empty else None
-    except Exception:
-        sites_web = None
+    ax.contour(xs, ys, valid_mask, levels=[0.5], colors=color, linewidths=linewidth)
 
-    # Figure
-    fig, ax = plt.subplots(figsize=(6, 6))
-    xmin, ymin, xmax, ymax = catch_web.total_bounds
-    ax.set_xlim(xmin, xmax)
-    ax.set_ylim(ymin, ymax)
 
-    # Catchment outline
-    catch_web.boundary.plot(ax=ax, color="black", linewidth=1.5, zorder=10, label="Catchment boundary")
+def _set_axis_limits_from_gdf(ax, gdf: gpd.GeoDataFrame, pad_fraction: float = 0.02) -> None:
+    """Set axis limits from GeoDataFrame bounds with small padding."""
+    minx, miny, maxx, maxy = gdf.total_bounds
+    xpad = (maxx - minx) * pad_fraction
+    ypad = (maxy - miny) * pad_fraction
+    ax.set_xlim(minx - xpad, maxx + xpad)
+    ax.set_ylim(miny - ypad, maxy + ypad)
 
-    # Classed streams
-    for lab, col_hex in zip(labels, colors):
-        seg = streams_web[streams_web["__class"] == lab]
-        if len(seg):
-            seg.plot(ax=ax, color=col_hex, linewidth=3.0, zorder=20, label=lab)
 
-    # Sites
-    if sites_web is not None and not sites_web.empty:
-        sites_web.plot(ax=ax, color="red", markersize=24, marker="o", zorder=30)
-        for i, r in sites_web.iterrows():
-            sid = r.get("Site_id", i)
-            ax.annotate(f"{sid}", (r.geometry.x, r.geometry.y),
-                        xytext=(4, 4), textcoords="offset points",
-                        fontsize=9, color="black")
+def _reproject_array_for_plotting(
+    data: np.ndarray,
+    src_meta: dict,
+    dst_crs: str = "EPSG:4326",
+    resampling: Resampling = Resampling.nearest
+) -> Tuple[np.ndarray, Tuple[float, float, float, float]]:
+    """
+    Reproject a raster array to another CRS for plotting only.
 
-    # Legend
-    legend_lines = [Line2D([0],[0], color="black", lw=6, label="Catchment boundary")]
-    legend_lines.append(Line2D([0],[0], marker="o", color="black", lw=0, markersize=8, label="Sites"))
-    for lab, col_hex in zip(labels, colors):
-        legend_lines.append(Line2D([0],[0], color=col_hex, lw=6, label=lab))
+    Returns
+    -------
+    dst_array : np.ndarray
+        Reprojected raster array.
+    dst_extent : tuple
+        Extent as (xmin, xmax, ymin, ymax) in target CRS.
+    """
+    src_crs = src_meta["crs"]
+    src_transform = src_meta["transform"]
+    src_width = src_meta["width"]
+    src_height = src_meta["height"]
 
-    ax.legend(handles=legend_lines, title="Riparian NDVI", loc="upper left", frameon=True)
-    ax.set_title(f"Riparian NDVI by Stream Order — {year}",fontsize=11, fontweight="bold")
-    ax.set_xlabel("Longitude",fontsize=10, fontweight="bold"); ax.set_ylabel("Latitude",fontsize=10, fontweight="bold")
+    left, bottom, right, top = array_bounds(src_height, src_width, src_transform)
+    dst_transform, dst_width, dst_height = calculate_default_transform(
+        src_crs, dst_crs, src_width, src_height, left, bottom, right, top
+    )
+
+    dst_array = np.full((dst_height, dst_width), np.nan, dtype="float32")
+
+    reproject(
+        source=data.astype("float32"),
+        destination=dst_array,
+        src_transform=src_transform,
+        src_crs=src_crs,
+        dst_transform=dst_transform,
+        dst_crs=dst_crs,
+        resampling=resampling,
+        src_nodata=np.nan,
+        dst_nodata=np.nan,
+    )
+
+    xmin, ymin, xmax, ymax = array_bounds(dst_height, dst_width, dst_transform)
+    return dst_array, (xmin, xmax, ymin, ymax)
+
+
+def _style_map_axes(ax, xlabel: str = "Longitude (°)", ylabel: str = "Latitude (°)", nbins: int = 4) -> None:
+    """Apply consistent map styling across all plots."""
+    ax.set_xlabel(xlabel, fontsize=10, fontweight="bold")
+    ax.set_ylabel(ylabel, fontsize=10, fontweight="bold")
     ax.tick_params(axis="both", labelsize=10)
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=nbins))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=nbins))
+    ax.ticklabel_format(style="plain", axis="both", useOffset=False)
     ax.grid(True, linestyle="--", alpha=0.6)
-    plt.tight_layout()
+
+
+def _apply_small_plot_padding(ax, extent: Tuple[float, float, float, float], pad_fraction: float = 0.02) -> None:
+    """Apply a small padding around the plotted extent."""
+    xmin, xmax, ymin, ymax = extent
+    xpad = (xmax - xmin) * pad_fraction
+    ypad = (ymax - ymin) * pad_fraction
+    ax.set_xlim(xmin - xpad, xmax + xpad)
+    ax.set_ylim(ymin - ypad, ymax + ypad)
+
+
+def _plot_raster_context_in_degrees(
+    data: np.ndarray,
+    src_meta: dict,
+    out_png: str,
+    title: str,
+    catchment_gdf: Optional[gpd.GeoDataFrame] = None,
+) -> None:
+    """Plot full raster in latitude/longitude degrees for context."""
+    plot_data, extent = _reproject_array_for_plotting(
+        data,
+        src_meta,
+        dst_crs="EPSG:4326",
+        resampling=Resampling.nearest,
+    )
+
+    catch_plot = catchment_gdf.to_crs(epsg=4326) if catchment_gdf is not None else None
+
+    if catch_plot is not None and not catch_plot.empty:
+        plot_bounds = tuple(catch_plot.total_bounds)
+    else:
+        plot_bounds = (extent[0], extent[2], extent[1], extent[3])
+
+    fig_w, fig_h = _get_adaptive_figsize_from_bounds(
+        plot_bounds,
+        base_size=6.0,
+        min_size=5.0,
+        max_size=11.0
+    )
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    im = ax.imshow(plot_data, cmap="viridis", extent=extent, origin="upper", interpolation="nearest")
+    _add_matched_colorbar(fig, ax, im, title)
+
+    #_plot_valid_raster_outline(ax, plot_data, extent, color="black", linewidth=1.0)
+
+    if catch_plot is not None and not catch_plot.empty:
+        catch_plot.boundary.plot(ax=ax, color="black", linewidth=1.2)
+        _set_axis_limits_from_gdf(ax, catch_plot, pad_fraction=0.02)
+    else:
+        _apply_small_plot_padding(ax, extent, pad_fraction=0.02)
+
+    ax.set_title(title, fontsize=11, fontweight="bold")
+    _style_map_axes(ax, nbins=4)
+
+    fig.tight_layout()
     plt.savefig(out_png, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
-# ============================== Config ==============================
+def _plot_clipped_raster_in_degrees(
+    data: np.ndarray,
+    src_meta: dict,
+    out_png: str,
+    title: str,
+    boundary_gdf: Optional[gpd.GeoDataFrame] = None,
+    site_point_gdf: Optional[gpd.GeoDataFrame] = None,
+    site_id: Optional[object] = None,
+) -> None:
+    """Plot clipped raster in latitude/longitude degrees."""
+    plot_data, extent = _reproject_array_for_plotting(
+        data,
+        src_meta,
+        dst_crs="EPSG:4326",
+        resampling=Resampling.nearest,
+    )
+
+    boundary_plot = boundary_gdf.to_crs(epsg=4326) if boundary_gdf is not None else None
+    site_plot = site_point_gdf.to_crs(epsg=4326) if site_point_gdf is not None else None
+
+    if boundary_plot is not None and not boundary_plot.empty:
+        plot_bounds = tuple(boundary_plot.total_bounds)
+    else:
+        plot_bounds = (extent[0], extent[2], extent[1], extent[3])
+
+    fig_w, fig_h = _get_adaptive_figsize_from_bounds(
+        plot_bounds,
+        base_size=5.0,
+        min_size=4.5,
+        max_size=9.0
+    )
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    im = ax.imshow(plot_data, extent=extent, cmap="viridis", origin="upper", interpolation="nearest")
+    _add_matched_colorbar(fig, ax, im, title)
+
+    #_plot_valid_raster_outline(ax, plot_data, extent, color="black", linewidth=1.0)
+
+    if boundary_plot is not None and not boundary_plot.empty:
+        #boundary_plot.boundary.plot(ax=ax, color="black", linewidth=1.2)
+        _set_axis_limits_from_gdf(ax, boundary_plot, pad_fraction=0.02)
+    else:
+        _apply_small_plot_padding(ax, extent, pad_fraction=0.02)
+
+    if site_plot is not None and not site_plot.empty:
+        site_plot.plot(ax=ax, markersize=15, color="red", marker="o")
+        if site_id is not None:
+            geom = site_plot.geometry.iloc[0]
+            x = geom.x if geom.geom_type == "Point" else geom.centroid.x
+            y = geom.y if geom.geom_type == "Point" else geom.centroid.y
+            ax.annotate(
+                f"{site_id}",
+                (x, y),
+                xytext=(5, 5),
+                textcoords="offset points",
+                fontsize=7,
+                color="black",
+            )
+
+    ax.set_title(title, fontsize=11, fontweight="bold")
+    _style_map_axes(ax, nbins=4)
+
+    fig.tight_layout()
+    plt.savefig(out_png, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _plot_riparian_map_for_year(
+    ST_gdf: gpd.GeoDataFrame,
+    catch_gdf: gpd.GeoDataFrame,
+    year: int,
+    out_png: str,
+):
+    """
+    Plot riparian NDVI by stream segment for a single year, with fixed bins and legend.
+    Expects a column on ST_gdf named 'Riparian NDVI - {year}'.
+
+    Plot is made in EPSG:4326 so axes are longitude/latitude in degrees,
+    consistent with the topography plotting style.
+    """
+    col = f"Riparian NDVI - {year}"
+    if col not in ST_gdf.columns:
+        _log("WARN", f"{_plot_riparian_map_for_year.__name__}: '{col}' not found on streams.")
+        return
+
+    breaks = [-np.inf, 0.0, 0.2, 0.4, 0.6, 0.8, np.inf]
+    colors = ["#d7191c", "#fdae61", "#ffea00", "#a6d96a", "#1a9641", "#00441b"]
+    labels = ["≤ 0.0", "0.0–0.2", "0.2–0.4", "0.4–0.6", "0.6–0.8", "> 0.8"]
+
+    plot_crs = 4326
+    streams_plot = ST_gdf.to_crs(epsg=plot_crs)
+    catch_plot = catch_gdf.to_crs(epsg=plot_crs)
+
+    vals = pd.to_numeric(streams_plot[col], errors="coerce")
+    cats = pd.cut(vals, breaks, right=True, labels=labels, include_lowest=True)
+    streams_plot = streams_plot.assign(__class=cats)
+
+    fig_w, fig_h = _get_adaptive_figsize_from_bounds(
+        tuple(catch_plot.total_bounds),
+        base_size=6.5,
+        min_size=5.0,
+        max_size=11.0
+    )
+
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+
+    xmin, ymin, xmax, ymax = catch_plot.total_bounds
+    xpad = (xmax - xmin) * 0.02
+    ypad = (ymax - ymin) * 0.02
+    ax.set_xlim(xmin - xpad, xmax + xpad)
+    ax.set_ylim(ymin - ypad, ymax + ypad)
+
+    catch_plot.boundary.plot(ax=ax, color="black", linewidth=1.5, zorder=10)
+
+    for lab, col_hex in zip(labels, colors):
+        seg = streams_plot[streams_plot["__class"] == lab]
+        if len(seg):
+            seg.plot(ax=ax, color=col_hex, linewidth=3.0, zorder=20)
+
+    legend_lines = [Line2D([0], [0], color="black", lw=6, label="Catchment boundary")]
+    for lab, col_hex in zip(labels, colors):
+        legend_lines.append(Line2D([0], [0], color=col_hex, lw=6, label=lab))
+
+    ax.legend(
+        handles=legend_lines,
+        title="Riparian NDVI",
+        loc="upper left",
+        bbox_to_anchor=(1.02, 1.0),
+        borderaxespad=0.0,
+        frameon=True,
+    )
+
+    ax.set_title(f"Riparian NDVI by Stream Order — {year}", fontsize=11, fontweight="bold")
+    ax.set_xlabel("Longitude (°)", fontsize=10, fontweight="bold")
+    ax.set_ylabel("Latitude (°)", fontsize=10, fontweight="bold")
+    ax.tick_params(axis="both", labelsize=10)
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=4))
+    ax.ticklabel_format(style="plain", axis="both", useOffset=False)
+    ax.grid(True, linestyle="--", alpha=0.6)
+
+    fig.tight_layout(rect=[0, 0, 0.80, 1])
+    plt.savefig(out_png, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
 
 @dataclass
 class VegConfig:
     """Inputs & knobs for vegetation processing."""
     chm_workspace: str
     catchment_path: str
-    sites_path: str
     datetime_range: str  # e.g., "2000-01-01/2024-12-31"
-    # CRS control (NEW): user can force a projected CRS for catchment & sites (e.g., "EPSG:3308")
     catchment_crs: Optional[object] = None
 
     # STAC/DEA parameters
     stac_url: str = "https://explorer.dea.ga.gov.au/stac"
     cloud_cover_lt: int = 20
-    filter_query: Optional[dict] = None  # CQL2 (if supported) or None → use cloud cover filter
-    # Pre/Post sensor split (DEA specifics)
-    split_date: str = "2016-01-01"  # LS7 pre, S2A/B post
-    # Bands per collection (override if DEA changes names)
+    filter_query: Optional[dict] = None
+    split_date: str = "2016-01-01"
     bands_ls7: Tuple[str, str] = ("nbart_red", "nbart_nir")
-    bands_s2: Tuple[str, str] = ("nbart_red", "nbart_nir_1")  # renamed to nbart_nir later
-    # Riparian analysis
+    bands_s2: Tuple[str, str] = ("nbart_red", "nbart_nir_1")
     riparian_buffer_m: float = 30.0
 
 
-# ============================== Main API ==============================
+def _write_catchment_annual_context_plots(
+    indices_output: str,
+    catch_plots: str,
+    catchment_gdf: gpd.GeoDataFrame,
+) -> None:
+    """
+    Write catchment-level annual raster plots for Annual NDVI and Annual C Factor.
+    This is independent of site polygons and ensures catchment plots are produced
+    even when the all-sites GPKG is missing.
+    """
+    try:
+        annual_targets = [
+            ("NDVI", os.path.join(indices_output, "NDVI", "Annual")),
+            ("C Factor", os.path.join(indices_output, "C Factor", "Annual")),
+        ]
+
+        for group_name, annual_dir in annual_targets:
+            if not os.path.isdir(annual_dir):
+                _log("WARN", f"Annual folder not found for {group_name}: {annual_dir}")
+                continue
+
+            for file in sorted(os.listdir(annual_dir)):
+                if not file.lower().endswith(".tif"):
+                    continue
+
+                raster_path = os.path.join(annual_dir, file)
+                short_name = os.path.splitext(file)[0]
+                out_png = os.path.join(catch_plots, f"{short_name}.png")
+
+                try:
+                    with rio.open(raster_path) as src:
+                        arr = src.read(1).astype("float32")
+                        if src.nodata is not None:
+                            arr = np.where(arr == src.nodata, np.nan, arr)
+
+                        src_meta = {
+                            "crs": src.crs,
+                            "transform": src.transform,
+                            "width": src.width,
+                            "height": src.height,
+                        }
+
+                    _plot_raster_context_in_degrees(
+                        data=arr,
+                        src_meta=src_meta,
+                        out_png=out_png,
+                        title=short_name,
+                        catchment_gdf=catchment_gdf,
+                    )
+                except Exception as e:
+                    _log("WARN", f"Catchment plot failed for {raster_path}: {e}")
+
+        _log("OK", "Catchment annual NDVI/C-factor plots checked/written.")
+    except Exception as e:
+        _log("WARN", f"Catchment annual plotting block failed: {e}")
+
 
 def veg_indices_and_c_factor(cfg: VegConfig):
     """
@@ -223,47 +564,51 @@ def veg_indices_and_c_factor(cfg: VegConfig):
     -------
     all_sites_gpkg, dem_crs, sites_datasets, indices_output, annual_ndvi_dir, annual_c_dir
     """
-    print("Starting processing vegetation and c factor...")
+    _log("INFO", "Starting vegetation indices and C-factor processing...")
 
     # ---------- Folders ----------
     catchment_name = os.path.splitext(os.path.basename(cfg.catchment_path))[0].replace("_", " ")
     catchment_folder = os.path.join(cfg.chm_workspace, catchment_name)
-    catch_datasets   = os.path.join(catchment_folder, "Catchment Datasets")
-    catch_plots      = os.path.join(catchment_folder, "Catchment Plots and Maps")
-    sites_datasets   = os.path.join(catchment_folder, "Sites Datasets")
-    sites_plots      = os.path.join(catchment_folder, "Sites Plots and Maps")
-    veg_folder       = os.path.join(catch_datasets, "Vegetation")
+    catch_datasets = os.path.join(catchment_folder, "Catchment Datasets")
+    catch_plots = os.path.join(catchment_folder, "Catchment Plots and Maps")
+    sites_datasets = os.path.join(catchment_folder, "Sites Datasets")
+    sites_plots = os.path.join(catchment_folder, "Sites Plots and Maps")
+    veg_folder = os.path.join(catch_datasets, "Vegetation")
     satellite_output = os.path.join(veg_folder, "Satellite data")
-    indices_output   = os.path.join(veg_folder, "Indices")
-    riparian_output  = os.path.join(veg_folder, "Riparian")
-    ndvi_output      = os.path.join(indices_output, "NDVI")
-    c_factor_output  = os.path.join(indices_output, "C Factor")
+    indices_output = os.path.join(veg_folder, "Indices")
+    riparian_output = os.path.join(veg_folder, "Riparian")
+    ndvi_output = os.path.join(indices_output, "NDVI")
+    c_factor_output = os.path.join(indices_output, "C Factor")
 
-    for d in [catchment_folder, catch_datasets, catch_plots, sites_datasets, sites_plots,
-              veg_folder, satellite_output, indices_output, ndvi_output, c_factor_output, riparian_output]:
+    for d in [
+        catchment_folder, catch_datasets, catch_plots, sites_datasets, sites_plots,
+        veg_folder, satellite_output, indices_output, ndvi_output, c_factor_output, riparian_output
+    ]:
         _ensure_dirs([d])
 
-    catch_gpkg      = os.path.join(catch_datasets, f"{catchment_name} Data.gpkg")
-    all_sites_gpkg  = os.path.join(sites_datasets,  f"{catchment_name} Sites Data.gpkg")
+    _log_folder_summary(catchment_folder, catch_datasets, catch_plots, veg_folder, sites_datasets, sites_plots)
 
-    # Annual subdirs
-    annual_ndvi_dir = os.path.join(ndvi_output,     "Annual")
-    annual_c_dir    = os.path.join(c_factor_output, "Annual")
+    catch_gpkg = os.path.join(catch_datasets, f"{catchment_name} Data.gpkg")
+    catch_layer = f"{catchment_name} Data"
+    all_sites_gpkg = os.path.join(sites_datasets, f"{catchment_name} Sites Data.gpkg")
+    all_sites_gpkg_or_none = _existing_or_none(all_sites_gpkg)
+
+    annual_ndvi_dir = os.path.join(ndvi_output, "Annual")
+    annual_c_dir = os.path.join(c_factor_output, "Annual")
     _ensure_dirs([annual_ndvi_dir, annual_c_dir])
 
     # ---------- Catchment & DEM ----------
     gdf = gpd.read_file(cfg.catchment_path)
     if gdf.empty:
         raise ValueError("Catchment file has no features.")
+    _log("OK", f"Catchment loaded: {cfg.catchment_path}")
 
-    # NEW: coerce catchment to user-specified projected CRS (handles missing/wrong CRS)
     if cfg.catchment_crs is not None:
         if gdf.crs is None:
             gdf = gdf.set_crs(cfg.catchment_crs)
         elif gdf.crs != cfg.catchment_crs:
             gdf = gdf.to_crs(cfg.catchment_crs)
 
-    crs = gdf.crs
     gdf_wgs84 = gdf.to_crs(epsg=4326)
     bbox = gdf_wgs84.total_bounds
 
@@ -271,27 +616,26 @@ def veg_indices_and_c_factor(cfg: VegConfig):
     dem_projected_file = os.path.join(topo_folder, "DEM.tif")
     if not os.path.exists(dem_projected_file):
         raise FileNotFoundError(f"DEM missing at {dem_projected_file}. Run dem_and_terrain first.")
+
     with rio.open(dem_projected_file) as dem_src:
-        dem_crs       = dem_src.crs
-        dem_transform = dem_src.transform
+        dem_crs = dem_src.crs
         dem_resolution = abs(dem_src.transform.a)
+
+    _log("OK", f"Using DEM from {_folder_label(topo_folder)}: {dem_projected_file}")
     stream_network = os.path.join(topo_folder, "Stream_Network.gpkg")
 
     # ---------- STAC: cache gate ----------
     try:
         requested_years = _years_from_interval(cfg.datetime_range)
     except Exception:
-        # fallback: infer from files present
         requested_years = sorted({
             int(m.group(1)) for f in os.listdir(annual_ndvi_dir)
             if (m := re.match(r"NDVI_(\d{4})\.tif$", f))
         })
 
-    ds: Optional[xr.Dataset] = None
     if requested_years and _all_annual_outputs_exist(annual_ndvi_dir, annual_c_dir, requested_years):
-        print("[cache] All ANNUAL NDVI & C_Factor rasters already exist for requested years; skipping STAC load.")
+        _log("INFO", "All annual NDVI and C-factor rasters already exist for requested years; skipping STAC load.")
     else:
-        # ---------- STAC query & load (YEAR-BY-YEAR to avoid huge memory) ----------
         catalog = pystac_client.Client.open(cfg.stac_url)
         odc.stac.configure_rio(cloud_defaults=True, aws={"aws_unsigned": True})
 
@@ -299,15 +643,12 @@ def veg_indices_and_c_factor(cfg: VegConfig):
         dt0, dt1 = cfg.datetime_range.split("/")
         dt_start, dt_end = pd.Timestamp(dt0), pd.Timestamp(dt1)
 
-        # Prepare time-step & annual dirs once
-        ts_ndvi_output   = os.path.join(ndvi_output,     "Time step")
-        ts_c_factor_out  = os.path.join(c_factor_output, "Time step")
+        ts_ndvi_output = os.path.join(ndvi_output, "Time step")
+        ts_c_factor_out = os.path.join(c_factor_output, "Time step")
         _ensure_dirs([ts_ndvi_output, ts_c_factor_out])
 
-        # A DEM-backed "like" for alignment/reprojection
         dem_ref = rxr.open_rasterio(dem_projected_file, masked=True).squeeze().copy()
 
-        # Prefer a CQL2 filter if available; otherwise fall back to legacy 'query='
         default_cql2 = {
             "op": "<",
             "args": [
@@ -316,25 +657,21 @@ def veg_indices_and_c_factor(cfg: VegConfig):
             ],
         }
 
-        # Iterate one year at a time; write that year's outputs before moving on
         for year in requested_years:
             year_start = pd.Timestamp(year=year, month=1, day=1)
-            year_end   = pd.Timestamp(year=year, month=12, day=31)
+            year_end = pd.Timestamp(year=year, month=12, day=31)
 
-            # Clip the year to the requested datetime_range
             y0 = max(year_start, dt_start)
-            y1 = min(year_end,   dt_end)
+            y1 = min(year_end, dt_end)
             if y0 > y1:
-                continue  # outside the requested range
-
-            # If annual outputs already exist for this year, skip heavy work
-            ndvi_fp_y = os.path.join(annual_ndvi_dir, f"NDVI_{year}.tif")
-            c_fp_y    = os.path.join(annual_c_dir,    f"C_Factor_{year}.tif")
-            if _both_exist(ndvi_fp_y, c_fp_y):
-                print(f"[cache] Annual NDVI/C for {year} already on disk; skipping STAC load for this year.")
                 continue
 
-            # Split the year across the sensor boundary (LS7 pre-split; S2 post-split)
+            ndvi_fp_y = os.path.join(annual_ndvi_dir, f"NDVI_{year}.tif")
+            c_fp_y = os.path.join(annual_c_dir, f"C_Factor_{year}.tif")
+            if _both_exist(ndvi_fp_y, c_fp_y):
+                _log("INFO", f"Annual NDVI/C for {year} already on disk; skipping STAC load for this year.")
+                continue
+
             subranges: List[Tuple[pd.Timestamp, pd.Timestamp, List[str], List[str]]] = []
             if y0 < SPLIT_DATE:
                 subranges.append((
@@ -347,7 +684,6 @@ def veg_indices_and_c_factor(cfg: VegConfig):
                     ["ga_s2am_ard_3", "ga_s2bm_ard_3"], list(cfg.bands_s2)
                 ))
 
-            # Collect datasets for this year only (small lists → tiny memory)
             ds_year_parts: List[xr.Dataset] = []
 
             for d0, d1, collections_sel, bands_sel in subranges:
@@ -355,7 +691,6 @@ def veg_indices_and_c_factor(cfg: VegConfig):
                     continue
                 dt_str = f"{d0:%Y-%m-%d}/{d1:%Y-%m-%d}"
 
-                # Try CQL2; fall back to legacy 'query=' if needed
                 try:
                     search = catalog.search(
                         bbox=bbox,
@@ -375,10 +710,9 @@ def veg_indices_and_c_factor(cfg: VegConfig):
                     items = list(search.items())
 
                 if not items:
-                    print(f"[WARN] No items for {collections_sel} in {dt_str}")
+                    _log("WARN", f"No items for {collections_sel} in {dt_str}")
                     continue
 
-                # === KEY CHANGE: force chunked (Dask) loading to avoid giant allocations ===
                 ds_part = odc.stac.load(
                     items,
                     bands=bands_sel,
@@ -387,38 +721,34 @@ def veg_indices_and_c_factor(cfg: VegConfig):
                     groupby="solar_day",
                     bbox=bbox,
                     dtype="float32",
-                    chunks={"time": 1, "x": 1024, "y": 1024},  # <- prevents 200+ GiB array allocation
+                    chunks={"time": 1, "x": 1024, "y": 1024},
                     fail_on_error=False,
                     progress=False,
                 )
 
-                # Normalize NIR naming across sensors (S2 often 'nbart_nir_1')
                 if "nbart_nir_1" in ds_part.data_vars and "nbart_nir" not in ds_part.data_vars:
                     ds_part = ds_part.rename({"nbart_nir_1": "nbart_nir"})
 
-                # Rare case: empty after load filters
                 if ds_part.sizes.get("time", 0) == 0:
                     continue
 
                 ds_year_parts.append(ds_part)
 
             if not ds_year_parts:
-                print(f"[WARN] No imagery loaded for {year}; skipping this year.")
+                _log("WARN", f"No imagery loaded for {year}; skipping this year.")
                 continue
 
-            # Concatenate THIS YEAR only, then compute and write THIS YEAR only
             ds_year = xr.concat(ds_year_parts, dim="time").sortby("time")
             if ds_year.sizes.get("time", 0) == 0:
-                print(f"[WARN] Year {year} concat produced 0 timesteps; skipping.")
+                _log("WARN", f"Year {year} concat produced 0 timesteps; skipping.")
                 del ds_year_parts, ds_year
                 gc.collect()
                 continue
-            # ---------- Time-step NDVI & C (cached) for this year ----------
-            # (keeps your existing outputs/filenames; processed year-by-year now)
+
             for t_idx, ts in enumerate(ds_year.time.values):
                 stamp = pd.to_datetime(ts).strftime("%Y%m%d")
                 ndvi_path = os.path.join(ts_ndvi_output, f"NDVI_{stamp}.tif")
-                c_path    = os.path.join(ts_c_factor_out, f"C_Factor_{stamp}.tif")
+                c_path = os.path.join(ts_c_factor_out, f"C_Factor_{stamp}.tif")
                 if _both_exist(ndvi_path, c_path):
                     continue
 
@@ -426,37 +756,39 @@ def veg_indices_and_c_factor(cfg: VegConfig):
                 nir = ds_year["nbart_nir"].isel(time=t_idx)
                 ndvi_ts = (nir - red) / (nir + red)
 
-                # Clip to catchment and align to DEM
                 ndvi_clip = ndvi_ts.rio.clip(gdf.geometry, gdf.crs, drop=True)
-                ndvi_aln  = ndvi_clip.rio.reproject_match(dem_ref)
+                ndvi_aln = ndvi_clip.rio.reproject_match(dem_ref)
                 ndvi_aln.rio.write_nodata(np.nan, inplace=True)
-                #ndvi_aln.rio.to_raster(ndvi_path)
 
                 c_factor = np.clip(np.exp(-2 * ndvi_aln), 0, 1)
                 cf_da = xr.DataArray(c_factor, coords=ndvi_aln.coords, dims=ndvi_aln.dims)
-                cf_da.rio.write_crs(gdf.crs, inplace=True)
+                cf_da = cf_da.where(np.isfinite(ndvi_aln))
+                cf_da.rio.write_crs(ndvi_aln.rio.crs, inplace=True)
                 cf_da.rio.write_nodata(np.nan, inplace=True)
-                #cf_da.rio.to_raster(c_path)
 
-            # ---------- Annual NDVI (median) & C for THIS YEAR only ----------
             ndvi_all = (ds_year["nbart_nir"] - ds_year["nbart_red"]) / (ds_year["nbart_nir"] + ds_year["nbart_red"])
             if ndvi_all.sizes.get("time", 0) == 0:
-                print(f"[WARN] No valid NDVI samples in {year}; skipping annual save.")
+                _log("WARN", f"No valid NDVI samples in {year}; skipping annual save.")
             else:
                 ndvi_med_year = ndvi_all.median(dim="time", skipna=True)
 
                 ndvi_year = ndvi_med_year.rio.clip(gdf.geometry, gdf.crs, drop=True).rio.reproject_match(dem_ref)
-                c_year    = xr.apply_ufunc(lambda x: np.clip(np.exp(-2 * x), 0, 1), ndvi_year).rio.reproject_match(dem_ref)
+                ndvi_year = ndvi_year.where(np.isfinite(ndvi_year))
+                ndvi_year.rio.write_nodata(np.nan, inplace=True)
+
+                c_year = xr.apply_ufunc(lambda x: np.clip(np.exp(-2 * x), 0, 1), ndvi_year)
+                c_year = c_year.where(np.isfinite(ndvi_year))
+                c_year.rio.write_crs(ndvi_year.rio.crs, inplace=True)
+                c_year.rio.write_nodata(np.nan, inplace=True)
 
                 ndvi_year.rio.to_raster(ndvi_fp_y)
                 c_year.rio.to_raster(c_fp_y)
-                print(f"[OK] Wrote annual NDVI/C rasters → {year}")
+                _log("OK", f"Wrote annual NDVI/C rasters for {year}")
 
-            # Release memory for this year before continuing
             del ds_year_parts, ds_year, ndvi_all
             gc.collect()
 
-        print("[OK] Saved timestep & annual NDVI/C rasters (processed year-by-year).")
+        _log("OK", "Saved timestep and annual NDVI/C rasters (processed year-by-year).")
 
     # ================= Riparian NDVI (per segment; per order × year) =================
     ST_gdf = gpd.read_file(stream_network)
@@ -465,27 +797,23 @@ def veg_indices_and_c_factor(cfg: VegConfig):
     if ST_gdf.crs != dem_crs:
         ST_gdf = ST_gdf.to_crs(dem_crs)
 
-    # Riparian polygons (union buffer around all segments)
     riparian_buf = ST_gdf.buffer(cfg.riparian_buffer_m).unary_union
     riparian_gdf = gpd.GeoDataFrame(geometry=[riparian_buf], crs=dem_crs)
 
-    # Build years_list from annual NDVI files present
     years_list = sorted({
         int(m.group(1)) for f in os.listdir(annual_ndvi_dir)
         if (m := re.match(r"NDVI_(\d{4})\.tif$", f))
     })
 
-    # Per-segment riparian NDVI columns + per-year maps
     for yy in years_list:
         colname = f"Riparian NDVI - {yy}"
         if colname not in ST_gdf.columns:
             ST_gdf[colname] = np.nan
         ndvi_path = os.path.join(annual_ndvi_dir, f"NDVI_{yy}.tif")
         if not os.path.exists(ndvi_path):
-            print(f"[WARN] Missing annual NDVI for {yy}: {ndvi_path}")
+            _log("WARN", f"Missing annual NDVI for {yy}: {ndvi_path}")
             continue
 
-        # Compute buffered segment means against NDVI raster
         with rio.open(ndvi_path) as src:
             st_proj = ST_gdf.to_crs(src.crs) if ST_gdf.crs != src.crs else ST_gdf
             vals = []
@@ -496,330 +824,314 @@ def veg_indices_and_c_factor(cfg: VegConfig):
                 buf = geom.buffer(cfg.riparian_buffer_m)
                 vals.append(_masked_mean(src, buf))
 
-            # Write values back on the original GeoDataFrame (respecting index)
             ST_gdf[colname] = (
                 pd.Series(vals, index=st_proj.index)
-                  .reindex(ST_gdf.index)
-                  .astype(float)
+                .reindex(ST_gdf.index)
+                .astype(float)
             )
 
-        # Per-year riparian map (matches your old output)
         try:
             out_png_year = os.path.join(catch_plots, f"Riparian_NDVI_by_StreamSegment_{yy}.png")
             _plot_riparian_map_for_year(
-                ST_gdf=ST_gdf,              # current streams (dem_crs)
-                catch_gdf=gdf,              # catchment boundary (already coerced above)
-                sites_path=cfg.sites_path,  # site points for labels
+                ST_gdf=ST_gdf,
+                catch_gdf=gdf,
                 year=int(yy),
                 out_png=out_png_year,
-                sites_target_crs=cfg.catchment_crs,  # <-- NEW: coerce sites to the same user CRS first
             )
-            print(f"[OK] Saved riparian map → {yy}")
+            _log("OK", f"Saved riparian map for {yy}")
         except Exception as e:
-            print(f"[WARN] Riparian map for {yy} failed: {e}")
+            _log("WARN", f"Riparian map for {yy} failed: {e}")
 
-        # Also write union riparian raster (mask NDVI to global riparian buffer)
         try:
             with rio.open(ndvi_path) as src_union:
                 rip_proj = riparian_gdf.to_crs(src_union.crs)
                 out_img, out_tr = rio_mask(src_union, rip_proj.geometry, crop=True, filled=False)
                 out_meta = src_union.meta.copy()
                 out_meta.update({"height": out_img.shape[1], "width": out_img.shape[2], "transform": out_tr})
-                rip_fp = os.path.join(riparian_output, f"Reparian_{yy}.tif")  # keep original name
+                rip_fp = os.path.join(riparian_output, f"Reparian_{yy}.tif")
                 _ensure_dirs([os.path.dirname(rip_fp)])
                 with rio.open(rip_fp, "w", **out_meta) as dst:
                     dst.write(out_img)
         except Exception as e:
-            print(f"[WARN] Could not write union riparian raster for {yy}: {e}")
+            _log("WARN", f"Could not write union riparian raster for {yy}: {e}")
 
-    # Per order × year summary + plot + CSV + append to catchment table
     try:
         riparian_year_cols = [c for c in ST_gdf.columns if isinstance(c, str) and c.startswith("Riparian NDVI - ")]
         if riparian_year_cols:
             years_sorted = sorted(int(c.split(" - ")[1]) for c in riparian_year_cols)
-            if "order" not in ST_gdf.columns:
-                raise ValueError("Streams layer lacks 'order' column (Strahler).")
-            orders_int = pd.to_numeric(ST_gdf["order"], errors="coerce").astype("Int64")
-            if orders_int.isna().all():
-                raise ValueError("'order' column is all NaN after coercion.")
-            ST_gdf = ST_gdf.assign(order_int=orders_int)
+            order_col = "order" if "order" in ST_gdf.columns else None
 
-            long_rows = []
-            for yy in years_sorted:
-                col = f"Riparian NDVI - {yy}"
-                grp = ST_gdf.groupby("order_int", dropna=True)[col].mean().reset_index()
-                grp["Year"] = yy
-                grp.rename(columns={col: "MeanRiparianNDVI"}, inplace=True)
-                long_rows.append(grp)
-            if long_rows:
-                order_ts_df = pd.concat(long_rows, ignore_index=True)
-                out_csv = os.path.join(riparian_output, "Riparian_NDVI_by_Order_and_Year.csv")
-                order_ts_df.to_csv(out_csv, index=False)
-                print(f"[OK] Wrote riparian NDVI order×year summary CSV → {out_csv}")
+            if order_col is None:
+                _log("WARN", "Stream order column not found on stream network; riparian order summary skipped.")
+            else:
+                rows = []
+                for yy in years_sorted:
+                    col = f"Riparian NDVI - {yy}"
+                    tmp = ST_gdf[[order_col, col]].copy()
+                    tmp[col] = pd.to_numeric(tmp[col], errors="coerce")
+                    tmp = tmp.dropna(subset=[order_col, col])
+                    if tmp.empty:
+                        continue
+                    grp = tmp.groupby(order_col, dropna=True)[col].mean().reset_index()
+                    grp["Year"] = int(yy)
+                    grp = grp.rename(columns={order_col: "Order", col: "Riparian_NDVI"})
+                    rows.append(grp)
 
-                pivot_df = (order_ts_df
-                            .pivot_table(index="Year", columns="order_int", values="MeanRiparianNDVI", aggfunc="mean")
-                            .sort_index())
+                if rows:
+                    riparian_summary_df = pd.concat(rows, ignore_index=True)
+                    riparian_summary_csv = os.path.join(riparian_output, "Riparian_NDVI_Mean_by_StreamOrder.csv")
+                    riparian_summary_df.to_csv(riparian_summary_csv, index=False)
+                    _log("OK", f"Saved riparian NDVI order summary CSV: {riparian_summary_csv}")
 
-                fig, ax = plt.subplots(figsize=(7, 4))
-                for ord_val in sorted(pivot_df.columns.dropna()):
-                    ax.plot(pivot_df.index.astype(int),
-                            pivot_df[ord_val],
-                            linewidth=1.2, marker="o", markersize=4,
-                            label=f"Order {int(ord_val)}")
-                yrs = np.array(sorted(pivot_df.index.astype(int)))
-                ax.set_xlim(yrs.min(), yrs.max())
-                tick_years = list(range((yrs.min() // 5) * 5, ((yrs.max() + 4) // 5) * 5 + 1, 5))
-                tick_years = [y for y in tick_years if yrs.min() <= y <= yrs.max()]
-                ax.set_xticks(tick_years)
-                ax.set_xticklabels([str(y) for y in tick_years])
-                ax.set_xticks(yrs, minor=True)
-                ax.set_ylim(0.0, 1.0)
-                ax.set_title("Riparian NDVI — Mean by Stream Order (annual)", fontsize=11, fontweight="bold")
-                ax.set_xlabel("Year", fontsize=10, fontweight="bold")
-                ax.set_ylabel("Mean Riparian NDVI", fontsize=10, fontweight="bold")
-                ax.tick_params(axis="both", labelsize=10)
-                ax.grid(True, which="both", linestyle="--", alpha=0.6)
-                ax.legend(title="Stream Order", loc="upper left", ncols=3, fontsize=9, title_fontsize=9, frameon=True)
-                plt.tight_layout()
-                out_png = os.path.join(catch_plots, "Riparian_NDVI_Mean_by_StreamOrder_Timeseries.png")
-                plt.savefig(out_png, dpi=300, bbox_inches="tight")
-                plt.close(fig)
-                print(f"[OK] Saved riparian NDVI time-series plot → {out_png}")
+                    pivot_df = riparian_summary_df.pivot(index="Year", columns="Order", values="Riparian_NDVI").sort_index()
 
-                # Append per-order columns per year into catchment GPKG
-                def _ordinal_word(n: int) -> str:
-                    mapping = {1:"First",2:"Second",3:"Third",4:"Fourth",5:"Fifth",
-                               6:"Sixth",7:"Seventh",8:"Eighth",9:"Ninth",10:"Tenth"}
-                    return mapping.get(int(n), f"{int(n)}th")
-
-                wide = pivot_df.reset_index().rename(columns={"Year": "Date"})
-                rename_map = {c: f"Riparian NDVI- {_ordinal_word(int(c))} Stream Order"
-                              for c in wide.columns if c != "Date" and not pd.isna(c)}
-                wide = wide.rename(columns=rename_map)
-                wide["Date"] = pd.to_numeric(wide["Date"], errors="coerce").astype("Int64")
-
-                try:
-                    base_gdf = gpd.read_file(catch_gpkg, layer=catch_layer)
-                    merged = base_gdf.merge(wide, on="Date", how="left")
-                    try:
-                        fiona.remove(catch_gpkg, layer=catch_layer)
-                    except Exception:
-                        pass
-                    gpd.GeoDataFrame(merged, geometry="geometry", crs=base_gdf.crs).to_file(
-                        catch_gpkg, layer=catch_layer, driver="GPKG"
+                    plt.figure(figsize=(8, 4.5))
+                    ax = plt.gca()
+                    for order in pivot_df.columns:
+                        ax.plot(
+                            pivot_df.index,
+                            pivot_df[order],
+                            marker="o",
+                            linewidth=1.6,
+                            label=f"Order {int(order)}"
+                        )
+                    ax.set_xlabel("Year", fontsize=10, fontweight="bold")
+                    ax.set_ylabel("Mean Riparian NDVI", fontsize=10, fontweight="bold")
+                    ax.set_title("Riparian NDVI Mean by Stream Order", fontsize=11, fontweight="bold")
+                    ax.tick_params(axis="both", labelsize=10)
+                    ax.grid(True, which="both", linestyle="--", alpha=0.6)
+                    ax.legend(
+                        title="Stream Order",
+                        loc="upper left",
+                        bbox_to_anchor=(1.02, 1.0),
+                        ncols=1,
+                        fontsize=9,
+                        title_fontsize=9,
+                        frameon=True,
+                        borderaxespad=0.0,
                     )
-                    print(f"[OK] Appended per-order riparian NDVI columns → {catch_gpkg} ({catch_layer}).")
-                except Exception as e:
-                    print(f"[ERROR] Appending per-order riparian NDVI failed: {e}")
-        else:
-            print("[WARN] No 'Riparian NDVI - YYYY' columns found on streams.")
-    except Exception as e:
-        print(f"[ERROR] Riparian NDVI order-timeseries failed: {e}")
+                    fig = plt.gcf()
+                    fig.tight_layout(rect=[0, 0, 0.80, 1])
+                    out_png = os.path.join(catch_plots, "Riparian_NDVI_Mean_by_StreamOrder_Timeseries.png")
+                    plt.savefig(out_png, dpi=300, bbox_inches="tight")
+                    plt.close(fig)
+                    _log("OK", f"Saved riparian NDVI time-series plot: {out_png}")
 
-    # Persist streams with new riparian columns
+                    def _ordinal_word(n: int) -> str:
+                        mapping = {
+                            1: "First", 2: "Second", 3: "Third", 4: "Fourth", 5: "Fifth",
+                            6: "Sixth", 7: "Seventh", 8: "Eighth", 9: "Ninth", 10: "Tenth"
+                        }
+                        return mapping.get(int(n), f"{int(n)}th")
+
+                    wide = pivot_df.reset_index().rename(columns={"Year": "Date"})
+                    rename_map = {
+                        c: f"Riparian NDVI- {_ordinal_word(int(c))} Stream Order"
+                        for c in wide.columns if c != "Date" and not pd.isna(c)
+                    }
+                    wide = wide.rename(columns=rename_map)
+                    wide["Date"] = pd.to_numeric(wide["Date"], errors="coerce").astype("Int64")
+
+                    try:
+                        base_gdf = gpd.read_file(catch_gpkg, layer=catch_layer)
+                        merged = base_gdf.merge(wide, on="Date", how="left")
+                        try:
+                            fiona.remove(catch_gpkg, layer=catch_layer)
+                        except Exception:
+                            pass
+                        gpd.GeoDataFrame(merged, geometry="geometry", crs=base_gdf.crs).to_file(
+                            catch_gpkg, layer=catch_layer, driver="GPKG"
+                        )
+                        _log("OK", f"Appended per-order riparian NDVI columns to {_folder_label(catch_gpkg)} ({catch_layer})")
+                    except Exception as e:
+                        _log("ERROR", f"Appending per-order riparian NDVI failed: {e}")
+        else:
+            _log("WARN", "No 'Riparian NDVI - YYYY' columns found on streams.")
+    except Exception as e:
+        _log("ERROR", f"Riparian NDVI order-timeseries failed: {e}")
+
     try:
         ST_gdf.to_file(stream_network, layer="Streams", driver="GPKG", if_exists="replace")
-        print(f"[OK] Wrote stream riparian NDVI columns → {stream_network} (Streams).")
+        _log("OK", f"Wrote stream riparian NDVI columns to {_folder_label(stream_network)} (Streams)")
     except Exception as e:
-        print(f"[ERROR] Writing riparian NDVI columns failed: {e}")
+        _log("ERROR", f"Writing riparian NDVI columns failed: {e}")
+
+    # ================= Catchment annual plots (independent of site polygons) =================
+    _write_catchment_annual_context_plots(
+        indices_output=indices_output,
+        catch_plots=catch_plots,
+        catchment_gdf=gdf,
+    )
 
     # ================= Per-site summaries & plots (Annual rasters only) =================
-    sites_poly_gdf = gpd.read_file(all_sites_gpkg)  # polygons from previous module
+    sites_poly_gdf = None
 
-    # For plotting-only points: coerce to user CRS first (if given), then reproject as needed later.
-    sites_point_gdf = gpd.read_file(cfg.sites_path)
-    if cfg.catchment_crs is not None:
-        if sites_point_gdf.crs is None:
-            sites_point_gdf = sites_point_gdf.set_crs(cfg.catchment_crs)
-        elif sites_point_gdf.crs != cfg.catchment_crs:
-            sites_point_gdf = sites_point_gdf.to_crs(cfg.catchment_crs)
+    if all_sites_gpkg_or_none is not None:
+        try:
+            sites_poly_gdf = gpd.read_file(all_sites_gpkg_or_none)
+            _log("OK", f"Site polygons loaded: {all_sites_gpkg_or_none}")
+        except Exception as e:
+            _log("WARN", f"Could not load site polygons and site-based summaries will be skipped: {e}")
+            sites_poly_gdf = None
+    else:
+        _log("WARN", "No all-sites GPKG found. Catchment and riparian outputs will still be produced, but site-based summaries will be skipped.")
 
     WH_rows = []
-    for idx, row in sites_poly_gdf.iterrows():
-        try:
-            site_id = row.get("Site_id", idx)
-            site_geom = row.geometry
-            attrs = row.drop(labels="geometry").to_dict()
-            site_gdf = gpd.GeoDataFrame([attrs], geometry=[site_geom], crs=dem_crs)
-            site_vals: Dict[str, float] = {}
+    if sites_poly_gdf is not None and not sites_poly_gdf.empty:
+        for idx, row in sites_poly_gdf.iterrows():
+            try:
+                site_id = row.get("Site_id", idx)
+                site_geom = row.geometry
+                attrs = row.drop(labels="geometry").to_dict()
+                site_gdf = gpd.GeoDataFrame([attrs], geometry=[site_geom], crs=dem_crs)
+                site_vals: Dict[str, float] = {}
 
-            site_data_dir = os.path.join(sites_datasets, f"Site_{site_id}")
-            site_plot_dir = os.path.join(sites_plots,    f"Site_{site_id}")
-            _ensure_dirs([site_data_dir, site_plot_dir])
+                site_data_dir = os.path.join(sites_datasets, f"Site_{site_id}")
+                site_plot_dir = os.path.join(sites_plots, f"Site_{site_id}")
+                _ensure_dirs([site_data_dir, site_plot_dir])
 
-            # Iterate over /Indices/*/Annual/*.tif (NDVI, C, future indices…)
-            for set1 in os.listdir(indices_output):
-                set1_path = os.path.join(indices_output, set1)
-                if not os.path.isdir(set1_path):
-                    continue
-                set2 = "Annual"
-                set2_path = os.path.join(set1_path, set2)
-                if not os.path.isdir(set2_path):
-                    continue
-
-                for file in os.listdir(set2_path):
-                    if not file.lower().endswith(".tif"):
+                for set1 in os.listdir(indices_output):
+                    set1_path = os.path.join(indices_output, set1)
+                    if not os.path.isdir(set1_path):
                         continue
-                    raster_path = os.path.join(set2_path, file)
-                    short_name = os.path.splitext(file)[0]
+                    set2 = "Annual"
+                    set2_path = os.path.join(set1_path, set2)
+                    if not os.path.isdir(set2_path):
+                        continue
 
-                    with rio.open(raster_path) as src:
-                        # Context map (full raster + all site points)
-                        full_data = src.read(1)
-                        if src.nodata is not None:
-                            full_data = np.where(full_data == src.nodata, np.nan, full_data)
-                        extent = [src.bounds.left, src.bounds.right, src.bounds.bottom, src.bounds.top]
-                        fig, ax = plt.subplots(figsize=(5, 5))
-                        im = ax.imshow(full_data, cmap="viridis", extent=extent, origin="upper")
-                        cbar = plt.colorbar(im, ax=ax, shrink=0.9); cbar.set_label(short_name)
-                        pts = sites_point_gdf
-                        if pts.crs != src.crs:
-                            pts = pts.to_crs(src.crs)
-                        pts.plot(ax=ax, markersize=15, color="red")
-                        for s_idx, s_row in pts.iterrows():
-                            ax.annotate(f"{s_row.get('Site_id', s_idx)}",
-                                        (s_row.geometry.x, s_row.geometry.y),
-                                        xytext=(3, 3), textcoords="offset points",
-                                        fontsize=7, color="black")
+                    for file in os.listdir(set2_path):
+                        if not file.lower().endswith(".tif"):
+                            continue
+                        raster_path = os.path.join(set2_path, file)
+                        short_name = os.path.splitext(file)[0]
 
-                        ax.set_title(short_name, fontsize=11, fontweight="bold")
-                        ax.set_xlabel("Longitude",fontsize=10, fontweight="bold"); ax.set_ylabel("Latitude",fontsize=10, fontweight="bold")
-                        ax.tick_params(axis="both", labelsize=10)
-                        # Limit number of ticks
-                        ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
-                        ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
-                
-                        # Add grid for clarity (optional)
-                        ax.grid(True, linestyle="--",alpha=0.6)
-                        plt.tight_layout()
-                        plt.savefig(os.path.join(catch_plots, f"{short_name}.png"), dpi=300)
-                        plt.close("all")
+                        with rio.open(raster_path) as src:
+                            # Stats over this site's polygon
+                            v = site_gdf.to_crs(src.crs) if site_gdf.crs != src.crs else site_gdf
+                            geom = [v.geometry.iloc[0]]
+                            out_image, out_transform = rio_mask(src, geom, crop=True, filled=False)
+                            masked_band = out_image[0]
+                            data = masked_band.filled(np.nan).astype(float)
+                            site_vals[f"{short_name} (mean)"] = round(float(np.nanmean(data)), 2) if data.size else np.nan
+                            site_vals[f"{short_name} (median)"] = round(float(np.nanmedian(data)), 2) if data.size else np.nan
 
-                        # Stats over this site's polygon
-                        v = site_gdf.to_crs(src.crs) if site_gdf.crs != src.crs else site_gdf
-                        geom = [v.geometry.iloc[0]]
-                        out_image, out_transform = rio_mask(src, geom, crop=True, filled=False)
-                        masked_band = out_image[0]
-                        data = masked_band.filled(np.nan).astype(float)
-                        site_vals[f"{short_name} (mean)"]   = round(float(np.nanmean(data)), 2) if data.size else np.nan
-                        site_vals[f"{short_name} (median)"] = round(float(np.nanmedian(data)), 2) if data.size else np.nan
+                            # Save clipped raster
+                            clipped_meta = src.meta.copy()
+                            clipped_meta.update({
+                                "driver": "GTiff",
+                                "height": out_image.shape[1],
+                                "width": out_image.shape[2],
+                                "transform": out_transform,
+                                "crs": src.crs,
+                                "nodata": np.nan,
+                                "count": 1,
+                                "dtype": "float32",
+                            })
+                            with rio.open(os.path.join(site_data_dir, f"{short_name}.tif"), "w", **clipped_meta) as dest:
+                                dest.write(out_image[0].filled(np.nan).astype("float32"), 1)
 
-                        # Save clipped raster
-                        clipped_meta = src.meta.copy()
-                        clipped_meta.update({
-                            "driver": "GTiff",
-                            "height": out_image.shape[1],
-                            "width":  out_image.shape[2],
-                            "transform": out_transform,
-                            "crs": src.crs,
-                            "nodata": src.nodata
-                        })
-                        with rio.open(os.path.join(site_data_dir, f"{short_name}.tif"), "w", **clipped_meta) as dest:
-                            dest.write(out_image)
+                            # Plot clipped raster in degrees
+                            try:
+                                plot_arr = out_image[0]
+                                if np.ma.isMaskedArray(plot_arr):
+                                    plot_arr = plot_arr.filled(np.nan)
+                                plot_arr = plot_arr.astype("float32")
 
-                        # Plot clipped raster + site point (if X_site/Y_site exist)
-                        try:
-                            if out_transform:
-                                left = out_transform[2]; top = out_transform[5]
-                                pxw  = out_transform[0]; pxh = -out_transform[4]
-                                right  = left + pxw * out_image.shape[2]
-                                bottom = top  - pxh * out_image.shape[1]
-                                ext = [left, right, bottom, top]
-                            else:
-                                ext = [0, out_image.shape[2], 0, out_image.shape[1]]
-                            fig, ax = plt.subplots(figsize=(5, 5))
-                            im = ax.imshow(out_image[0], extent=ext, cmap="viridis", origin="upper")
-                            cbar = plt.colorbar(im, ax=ax, orientation="vertical", shrink=0.8)
-                            cbar.set_label(short_name, fontsize=9)
-                            v.boundary.plot(ax=ax, color="black", linewidth=1.2)
-                            if "X_site" in site_gdf.columns and "Y_site" in site_gdf.columns:
-                                sx, sy = site_gdf["X_site"].iloc[0], site_gdf["Y_site"].iloc[0]
-                                gpd.GeoSeries([Point(sx, sy)], crs=v.crs).plot(
-                                    ax=ax, markersize=15, color="red", marker="o", label="Site location"
+                                clip_meta = {
+                                    "crs": src.crs,
+                                    "transform": out_transform,
+                                    "width": out_image.shape[2],
+                                    "height": out_image.shape[1],
+                                }
+
+                                site_point_gdf = None
+                                if "X_site" in site_gdf.columns and "Y_site" in site_gdf.columns:
+                                    sx, sy = site_gdf["X_site"].iloc[0], site_gdf["Y_site"].iloc[0]
+                                    site_point_gdf = gpd.GeoDataFrame(
+                                        {"Site_id": [site_id]},
+                                        geometry=[Point(sx, sy)],
+                                        crs=v.crs,
+                                    )
+
+                                _plot_clipped_raster_in_degrees(
+                                    data=plot_arr,
+                                    src_meta=clip_meta,
+                                    out_png=os.path.join(site_plot_dir, f"{short_name}.png"),
+                                    title=f"{short_name} - Site {site_id}",
+                                    boundary_gdf=v,
+                                    site_point_gdf=site_point_gdf,
+                                    site_id=site_id,
                                 )
-                                ax.annotate(f"{site_id}", (sx, sy),
-                                            xytext=(5, 5), textcoords="offset points",
-                                            fontsize=7, color="black")
+                            except Exception as e:
+                                _log("WARN", f"Plotting {short_name} for site {site_id} failed: {e}")
 
-                            ax.set_title(f"{short_name} - Site {site_id}",fontsize=11, fontweight="bold")
-                            ax.set_xlabel("Longitude",fontsize=10, fontweight="bold"); ax.set_ylabel("Latitude",fontsize=10, fontweight="bold")
-                            ax.tick_params(axis="both", labelsize=10)
-                            # Limit number of ticks
-                            ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
-                            ax.yaxis.set_major_locator(MaxNLocator(nbins=4))
-                    
-                            # Add grid for clarity (optional)
-                            ax.grid(True, linestyle="--", alpha=0.6)
-                            plt.tight_layout()
-                            plt.savefig(os.path.join(site_plot_dir, f"{short_name}.png"), dpi=200)
-                            plt.close("all")
-                        except Exception as e:
-                            print(f"[WARN] Plotting {short_name} for site {site_id} failed: {e}")
+                # === Per-site mean of Reparian_{year}.tif (union riparian) ===
+                if os.path.isdir(riparian_output):
+                    for rf in os.listdir(riparian_output):
+                        if not (rf.lower().endswith(".tif") and rf.startswith("Reparian_")):
+                            continue
+                        year_str = os.path.splitext(rf)[0].split("_")[-1]
+                        rip_fp = os.path.join(riparian_output, rf)
+                        with rio.open(rip_fp) as src_rip:
+                            v_rip = site_gdf.to_crs(src_rip.crs) if site_gdf.crs != src_rip.crs else site_gdf
+                            geom = [v_rip.geometry.iloc[0]]
+                            rip_img, _ = rio_mask(src_rip, geom, crop=True, filled=False)
+                            rip_band = rip_img[0]
+                            site_vals[f"Reparian_ndvi_{year_str}"] = (
+                                np.nan if (rip_band.size == 0 or np.ma.count(rip_band) == 0)
+                                else round(float(np.ma.mean(rip_band)), 4)
+                            )
 
-            # === Per-site mean of Reparian_{year}.tif (union riparian) ===
-            if os.path.isdir(riparian_output):
-                for rf in os.listdir(riparian_output):
-                    if not (rf.lower().endswith(".tif") and rf.startswith("Reparian_")):
-                        continue
-                    year_str = os.path.splitext(rf)[0].split("_")[-1]
-                    rip_fp = os.path.join(riparian_output, rf)
-                    with rio.open(rip_fp) as src_rip:
-                        v_rip = site_gdf.to_crs(src_rip.crs) if site_gdf.crs != src_rip.crs else site_gdf
-                        geom = [v_rip.geometry.iloc[0]]
-                        rip_img, _ = rio_mask(src_rip, geom, crop=True, filled=False)
-                        rip_band = rip_img[0]
-                        site_vals[f"Reparian_ndvi_{year_str}"] = (
-                            np.nan if (rip_band.size == 0 or np.ma.count(rip_band) == 0)
-                            else round(float(np.ma.mean(rip_band)), 4)
-                        )
+                rip_pairs = []
+                for k, val in site_vals.items():
+                    if k.startswith("Reparian_ndvi_"):
+                        try:
+                            yr = int(k.split("_")[-1])
+                            rip_pairs.append((yr, float(val)))
+                        except Exception:
+                            pass
 
-            # Per-site riparian NDVI timeseries plot (if >=2 years)
-            rip_pairs = []
-            for k, val in site_vals.items():
-                if k.startswith("Reparian_ndvi_"):
-                    try:
-                        yr = int(k.split("_")[-1])
-                        rip_pairs.append((yr, float(val)))
-                    except Exception:
-                        pass
-            
-            rip_pairs.sort(key=lambda t: t[0])
-            years = [y for y, _v in rip_pairs]
-            vals  = [v for _y, v in rip_pairs if np.isfinite(v)]
+                rip_pairs.sort(key=lambda t: t[0])
+                years = [y for y, _v in rip_pairs]
+                vals = [v for _y, v in rip_pairs if np.isfinite(v)]
 
-            if len(years) >= 2 and len(vals) >= 2:
-                plt.figure(figsize=(7, 4))
-                plt.plot(years, [vv for vv in vals], marker="o", color="black", linewidth=1.2)
-                plt.xlabel("Year", fontsize=10, fontweight="bold")
-                plt.ylabel("Riparian NDVI (mean)", fontsize=10, fontweight="bold")
-                plt.title(f"Riparian Area mean NDVI - Site {site_id}", fontsize=11, fontweight="bold")          
-                plt.grid(True, linestyle="--", alpha=0.6)
-                first, last = years[0], years[-1]
-                tick_years = list(range(first, last + 1, 4))
-                plt.xlim(first, last); plt.xticks(tick_years, [str(y) for y in tick_years], fontsize=9)
-                ax = plt.gca(); ax.yaxis.set_major_formatter(FormatStrFormatter("%.2f"))
-                ax.tick_params(axis="both", labelsize=10)
-                plt.tight_layout()
-                plt.savefig(os.path.join(site_plot_dir, f"Site_{site_id}_Riparian_NDVI_Timeseries.png"),
-                            dpi=300, bbox_inches="tight")
-                plt.close()
+                if len(years) >= 2 and len(vals) >= 2:
+                    plt.figure(figsize=(7, 4))
+                    plt.plot(years, [vv for vv in vals], marker="o", color="black", linewidth=1.2)
+                    plt.xlabel("Year", fontsize=10, fontweight="bold")
+                    plt.ylabel("Riparian NDVI (mean)", fontsize=10, fontweight="bold")
+                    plt.title(f"Riparian Area mean NDVI - Site {site_id}", fontsize=11, fontweight="bold")
+                    plt.grid(True, linestyle="--", alpha=0.6)
+                    first, last = years[0], years[-1]
+                    tick_years = list(range(first, last + 1, 4))
+                    plt.xlim(first, last)
+                    plt.xticks(tick_years, [str(y) for y in tick_years], fontsize=9)
+                    ax = plt.gca()
+                    ax.yaxis.set_major_formatter(FormatStrFormatter("%.2f"))
+                    ax.tick_params(axis="both", labelsize=10)
+                    plt.tight_layout()
+                    plt.savefig(
+                        os.path.join(site_plot_dir, f"Site_{site_id}_Riparian_NDVI_Timeseries.png"),
+                        dpi=300,
+                        bbox_inches="tight"
+                    )
+                    plt.close()
 
-            # Persist per-site
-            site_gdf = site_gdf.assign(**site_vals)
-            WH_rows.append(site_gdf)
-            site_gpkg = os.path.join(site_data_dir, f"Site_{site_id}.gpkg")
-            site_csv  = os.path.join(site_data_dir, f"Site_{site_id}.csv")
-            site_gdf.to_file(site_gpkg, driver="GPKG")
-            site_gdf.drop(columns="geometry").to_csv(site_csv, index=False)
-            print(f"[OK] Site {site_id} vegetation data & plots saved.")
-        except Exception as e:
-            print(f"[ERROR] Site {row.get('Site_id', idx)} failed: {e}")
-            continue
+                site_gdf = site_gdf.assign(**site_vals)
+                WH_rows.append(site_gdf)
+                site_gpkg = os.path.join(site_data_dir, f"Site_{site_id}.gpkg")
+                site_csv = os.path.join(site_data_dir, f"Site_{site_id}.csv")
+                site_gdf.to_file(site_gpkg, driver="GPKG")
+                site_gdf.drop(columns="geometry").to_csv(site_csv, index=False)
+                _log("OK", f"Site {site_id} vegetation data and plots saved.")
+            except Exception as e:
+                _log("ERROR", f"Site {row.get('Site_id', idx)} failed: {e}")
+                continue
+    else:
+        _log("WARN", "No valid site polygons available. Per-site vegetation summaries and plots were skipped.")
 
     # =========================================================================
     # DEACTIVATED: Combined "all sites" update/write to all_sites_gpkg & CSV
-    # (as requested, we only comment these lines; no code removed or altered)
     # -------------------------------------------------------------------------
     # all_gdf = gpd.GeoDataFrame(pd.concat(WH_rows, ignore_index=True), crs=dem_crs)
     # all_sites_csv = os.path.join(sites_datasets, f"{catchment_name} Sites Data.csv")
@@ -828,5 +1140,5 @@ def veg_indices_and_c_factor(cfg: VegConfig):
     # =========================================================================
 
     gc.collect()
-    print("Done!")
+    _log("OK", "Vegetation indices and C-factor processing completed.")
     return all_sites_gpkg, dem_crs, sites_datasets, indices_output, annual_ndvi_dir, annual_c_dir

@@ -1,4 +1,3 @@
-# src/chm/monitoring_append.py
 from __future__ import annotations
 
 # ---------- stdlib ----------
@@ -88,13 +87,13 @@ def _threshold_for(var: str, mean_val: float, cfg: MonitoringConfig) -> float:
     return float(rule(mean_val)) if callable(rule) else float(rule)
 
 
-def _read_sites_gpkg(base_sites: Path, catchment_name: str) -> gpd.GeoDataFrame:
+def _read_sites_gpkg(base_sites: Path, catchment_name: str) -> Optional[gpd.GeoDataFrame]:
     gpkg = base_sites / f"{catchment_name} Sites Data.gpkg"
     if not gpkg.exists():
-        raise FileNotFoundError(f"Sites GPKG not found: {gpkg}")
+        return None
     gdf = gpd.read_file(gpkg)
     if "Site_id" not in gdf.columns:
-        raise ValueError("Sites GPKG must have an 'id' column.")
+        raise ValueError("Sites GPKG must have a 'Site_id' column.")
     return gdf
 
 
@@ -302,8 +301,11 @@ def monitoring_data(cfg: MonitoringConfig) -> Path:
 
     # ---- load sites
     sites_gdf = _read_sites_gpkg(sites_ds, catchment_name)
-    crs_sites = sites_gdf.crs
+    if sites_gdf is None:
+        print(f"[info] sites GPKG missing for {catchment_name}; monitoring append skipped.")
+        return sites_ds
 
+    crs_sites = sites_gdf.crs
     combined_summaries: List[pd.DataFrame] = []
 
     for _, row in sites_gdf.iterrows():
