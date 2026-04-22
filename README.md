@@ -282,6 +282,9 @@ Datasets and services are credited to their respective providers, including:
 - Australian Gridded Climate Data (AGCD)  
 - ABARES (Land use datasets)  
 
+**Maintainer**: Jabbar Khaledi – [jabbarkhaledi88@gmail.com](mailto:jabbarkhaledi88@gmail.com)
+
+
 ## 📖 Citation
 
 If you use this package in your research, report, or project, please cite it as:
@@ -299,5 +302,3 @@ Khaledi, J., Nyman, P., & Richards, P. (2026). *Catchment Health Metrics (CHM): 
   version = {0.1.0},
   url = {https://github.com/mosaic-insights/Catchment-Health-Metrics}
 }
-
-**Maintainer**: Jabbar Khaledi – [jabbarkhaledi88@gmail.com](mailto:jabbarkhaledi88@gmail.com)
