@@ -486,6 +486,12 @@ def _compute_slope_aspect(dem_data: np.ndarray, xres: float, yres: float) -> Dic
         "Aspect in degree.tif": aspect_deg,
     }
 
+def _add_matched_colorbar(fig, ax, im, label: str, size: str = "4.5%", pad: float = 0.08):
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size=size, pad=pad)
+    cbar = fig.colorbar(im, cax=cax)
+    cbar.set_label(label, fontsize=9)
+    return cbar
 
 def _compute_tpi_tri(dem_data: np.ndarray) -> Dict[str, np.ndarray]:
     """
@@ -734,11 +740,16 @@ def _plot_raster_with_overlays(
             origin="upper",
             interpolation="nearest"
         )
+        if plot_in_geographic_coords:
+            ymin, ymax = extent[2], extent[3]
+            mean_lat = (ymin + ymax) / 2.0
+            ax.set_aspect(1 / np.cos(np.deg2rad(mean_lat)), adjustable="box")
+        else:
+            ax.set_aspect("equal", adjustable="box")
 
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes("right", size="4.5%", pad=0.08)
-        cbar = fig.colorbar(im, cax=cax)
-        cbar.set_label(colorbar_label or "Value", fontsize=9)
+        _add_matched_colorbar(fig, ax, im, colorbar_label or "Value")
+
+        _add_matched_colorbar(fig, ax, im, colorbar_label or "Value", pad=0.18)
 
         ax.set_title(title, **(title_kwargs or {"fontsize": 11, "fontweight": "bold"}))
 

@@ -114,6 +114,29 @@ def _all_annual_outputs_exist(annual_ndvi_dir: str, annual_c_dir: str, years: Li
             return False
     return True
 
+def _clean_index_array(arr: np.ndarray, index_name: str = "") -> np.ndarray:
+    """
+    Clean NDVI / C-factor arrays before plotting or saving.
+
+    NDVI should be between -1 and 1.
+    C-factor should be between 0 and 1.
+    Very large values such as 1e38 are usually NoData/fill values.
+    """
+    arr = arr.astype("float32", copy=True)
+
+    # Remove non-finite values and common huge raster fill values
+    arr = np.where(np.isfinite(arr), arr, np.nan)
+    arr = np.where(np.abs(arr) > 1e6, np.nan, arr)
+
+    name = index_name.lower()
+
+    if "ndvi" in name:
+        arr = np.where((arr >= -1.0) & (arr <= 1.0), arr, np.nan)
+
+    if "c_factor" in name or "c factor" in name:
+        arr = np.where((arr >= 0.0) & (arr <= 1.0), arr, np.nan)
+
+    return arr
 
 def _zonal_mean(raster_path: str, geom, target_crs) -> float:
     """Mean over geometry; returns np.nan if file missing or empty."""
@@ -251,7 +274,8 @@ def _reproject_array_for_plotting(
         src_nodata=np.nan,
         dst_nodata=np.nan,
     )
-
+    dst_array = np.where(np.isfinite(dst_array), dst_array, np.nan)
+    dst_array = np.where(np.abs(dst_array) > 1e6, np.nan, dst_array)
     xmin, ymin, xmax, ymax = array_bounds(dst_height, dst_width, dst_transform)
     return dst_array, (xmin, xmax, ymin, ymax)
 
@@ -521,8 +545,11 @@ def _write_catchment_annual_context_plots(
                 try:
                     with rio.open(raster_path) as src:
                         arr = src.read(1).astype("float32")
+
                         if src.nodata is not None:
                             arr = np.where(arr == src.nodata, np.nan, arr)
+
+                        arr = _clean_index_array(arr, short_name)
 
                         src_meta = {
                             "crs": src.crs,
