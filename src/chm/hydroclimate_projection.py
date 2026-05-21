@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # ============== stdlib ==============
 import os
+import gc
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -416,6 +417,28 @@ def hydroclimate_projections(cfg: AwralProjConfig) -> Tuple[Optional[str], str]:
                 ds_sub.close()
             except Exception:
                 pass
+            # Clean per variable/projection objects
+            try:
+                del da, daily_catch
+            except Exception:
+                pass
+
+            try:
+                del daily_site
+            except Exception:
+                pass
+
+            try:
+                del df_c, df_s
+            except Exception:
+                pass
+
+            try:
+                del ds_sub
+            except Exception:
+                pass
+
+            gc.collect()
 
     # ========== write outputs ==========
     # ---- Catchment CSV ----
@@ -473,5 +496,47 @@ def hydroclimate_projections(cfg: AwralProjConfig) -> Tuple[Optional[str], str]:
             print(f"[OK] Site_{sid} hydroclimate projections CSV: {out_csv}")
             print(f"[OK] Site_{sid} hydroclimate projections CSV: {out_csv_}")
 
+    # =========================
+    # Memory cleanup
+    # =========================
+    try:
+        ds.close()
+    except Exception:
+        pass
+
+    try:
+        ds_sub.close()
+    except Exception:
+        pass
+
+    try:
+        del catch_gdf, catch_union, catch_geom, catch_cent
+    except Exception:
+        pass
+
+    try:
+        del sites, site_frames
+    except Exception:
+        pass
+
+    try:
+        del catch_merged, df_c, df_s, df
+    except Exception:
+        pass
+
+    try:
+        del da, daily_catch, daily_site
+    except Exception:
+        pass
+
+    try:
+        del ds, ds_sub
+    except Exception:
+        pass
+
+    gc.collect()
+
+    print("[INFO] Memory cleanup completed.")
     print("Finished projected AWRAL processing.")
-    return sites_path_used, sites_datasets
+
+    return

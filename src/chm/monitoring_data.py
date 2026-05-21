@@ -12,6 +12,7 @@ import pandas as pd
 import geopandas as gpd
 import matplotlib.pyplot as plt
 from matplotlib.dates import AutoDateLocator, AutoDateFormatter
+import gc
 
 
 # ====================== configuration ======================
@@ -365,7 +366,24 @@ def monitoring_data(cfg: MonitoringConfig) -> Path:
                 out_png=plot_folder / f"Site_{site_id}_Monitoring_TimeSeries.png",
                 cfg=cfg,
             )
+            # =========================
+            # Per-site cleanup
+            # =========================
+            plt.close("all")
 
+            try:
+                del mdf, rep, combined, gdf_out
+            except Exception:
+                pass
+
+            try:
+                del summary_df, vars_for_site, site_attrs
+            except Exception:
+                pass
+
+            gc.collect()
+
+            print(f"[INFO] site {site_id}: memory cleanup completed.")
             print(f"[OK] processed site {site_id}")
 
         except Exception as e:
@@ -377,5 +395,34 @@ def monitoring_data(cfg: MonitoringConfig) -> Path:
         all_summary.to_csv(sites_ds / "All_Sites_Monitoring_Summary.csv", index=False)
         print(f"[OK] combined summary → {(sites_ds / 'All_Sites_Monitoring_Summary.csv').as_posix()}")
 
+    # =========================
+    # Memory cleanup
+    # =========================
+    plt.close("all")
+
+    try:
+        del sites_gdf
+    except Exception:
+        pass
+
+    try:
+        del combined_summaries, all_summary
+    except Exception:
+        pass
+
+    try:
+        del mdf, rep, combined, gdf_out
+    except Exception:
+        pass
+
+    try:
+        del summary_df, vars_for_site, site_attrs
+    except Exception:
+        pass
+
+    gc.collect()
+
+    print("[INFO] Memory cleanup completed.")
     print("[done] monitoring data appended.")
+
     return sites_ds

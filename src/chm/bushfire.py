@@ -17,7 +17,7 @@ from rasterio.features import rasterize
 import matplotlib.pyplot as plt
 from shapely.geometry import mapping
 from shapely.ops import unary_union
-
+import gc
 
 # ========================= Config =========================
 
@@ -593,5 +593,59 @@ def historical_bushfire(cfg: BushfireConfig) -> Tuple[str, str]:
         _log("WARN", f"Could not write updated sites GPKG: {e}")
     """
 
+    # =========================
+    # Memory cleanup
+    # =========================
+    plt.close("all")
+
+    try:
+        del catch_gdf, catch_wgs
+    except Exception:
+        pass
+
+    try:
+        del fire_all, fire_clip, fire_site, win
+    except Exception:
+        pass
+
+    try:
+        del sites, site_geom
+    except Exception:
+        pass
+
+    try:
+        del sdr, twi, burn, burn_twi
+    except Exception:
+        pass
+
+    try:
+        del burned_sdr, twi_burn, sorted_sdr, sorted_twi
+    except Exception:
+        pass
+
+    try:
+        del cum_counts, cum_pct_site, cum_frac_site
+    except Exception:
+        pass
+
+    try:
+        del sdr_auc_ts, twi_auc_ts
+    except Exception:
+        pass
+
+    try:
+        del sdr_line_profiles, twi_line_profiles
+    except Exception:
+        pass
+
+    try:
+        del years_all, sdr_y, twi_y
+    except Exception:
+        pass
+
+    gc.collect()
+
+    _log("INFO", "Memory cleanup completed.")
     _log("OK", "Historical bushfire processing completed")
-    return all_sites_gpkg, sites_datasets
+
+    return

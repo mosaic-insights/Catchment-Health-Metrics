@@ -139,30 +139,50 @@ def _clean_index_array(arr: np.ndarray, index_name: str = "") -> np.ndarray:
     return arr
 
 def _zonal_mean(raster_path: str, geom, target_crs) -> float:
-    """Mean over geometry; returns np.nan if file missing or empty."""
+    """Mean over geometry; returns np.nan if file missing or clipped region has no valid raster cells."""
     if not os.path.exists(raster_path):
         return np.nan
-    with rio.open(raster_path) as src:
-        geom_proj = gpd.GeoSeries([geom], crs=target_crs).to_crs(src.crs).geometry.iloc[0]
-        out, _ = rio_mask(src, [geom_proj], crop=True, filled=False)
-        band = out[0]
-        data = band.filled(np.nan).astype(float) if np.ma.isMaskedArray(band) else band.astype(float)
-        if src.nodata is not None:
-            data = np.where(data == src.nodata, np.nan, data)
-        m = np.nanmean(data)
-        return float(m) if np.isfinite(m) else np.nan
+
+    try:
+        with rio.open(raster_path) as src:
+            geom_proj = gpd.GeoSeries([geom], crs=target_crs).to_crs(src.crs).geometry.iloc[0]
+            out, _ = rio_mask(src, [geom_proj], crop=True, filled=False)
+
+            band = out[0]
+            data = band.filled(np.nan).astype(float) if np.ma.isMaskedArray(band) else band.astype(float)
+
+            if src.nodata is not None:
+                data = np.where(data == src.nodata, np.nan, data)
+
+            data = np.where(np.isfinite(data), data, np.nan)
+
+            if not np.isfinite(data).any():
+                return np.nan
+
+            return float(np.nanmean(data))
+
+    except Exception:
+        return np.nan
 
 
 def _masked_mean(src: rio.DatasetReader, geom) -> float:
-    """Mean of masked region; np.nan on failure/empty."""
+    """Mean of masked region; returns np.nan if region has no valid raster cells."""
     try:
         out_img, _ = rio_mask(src, [geom], crop=True, filled=False)
         band = out_img[0]
+
         arr = band.filled(np.nan).astype(float) if np.ma.isMaskedArray(band) else band.astype(float)
+
         if src.nodata is not None:
             arr = np.where(arr == src.nodata, np.nan, arr)
-        m = np.nanmean(arr)
-        return float(m) if np.isfinite(m) else np.nan
+
+        arr = np.where(np.isfinite(arr), arr, np.nan)
+
+        if not np.isfinite(arr).any():
+            return np.nan
+
+        return float(np.nanmean(arr))
+
     except Exception:
         return np.nan
 
@@ -388,7 +408,7 @@ def _plot_clipped_raster_in_degrees(
     #_plot_valid_raster_outline(ax, plot_data, extent, color="black", linewidth=1.0)
 
     if boundary_plot is not None and not boundary_plot.empty:
-        #boundary_plot.boundary.plot(ax=ax, color="black", linewidth=1.2)
+        boundary_plot.boundary.plot(ax=ax, color="black", linewidth=1.2)
         _set_axis_limits_from_gdf(ax, boundary_plot, pad_fraction=0.02)
     else:
         _apply_small_plot_padding(ax, extent, pad_fraction=0.02)
@@ -494,13 +514,79 @@ def _plot_riparian_map_for_year(
     plt.savefig(out_png, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
+def _mask_raster_by_waterbodies(
+    da: xr.DataArray,
+    waterbodies_gpkg: str,
+    waterbodies_layer: str = "DEA_Waterbodies",
+) -> xr.DataArray:
+    """
+    Mask raster cells overlapping DEA waterbodies.
 
+    Waterbody-overlapped cells are set to NaN.
+    If the waterbodies file/layer is missing or empty, the original raster is returned.
+    """
+    if not os.path.exists(waterbodies_gpkg):
+        _log("WARN", f"DEA Waterbodies file not found. NDVI water mask skipped: {waterbodies_gpkg}")
+        return da
+
+    try:
+        try:
+            water_gdf = gpd.read_file(waterbodies_gpkg, layer=waterbodies_layer)
+        except Exception:
+            # Fallback if the GPKG has no named layer or layer name differs
+            water_gdf = gpd.read_file(waterbodies_gpkg)
+
+        if water_gdf.empty:
+            _log("WARN", "DEA Waterbodies layer is empty. NDVI water mask skipped.")
+            return da
+
+        if da.rio.crs is None:
+            _log("WARN", "NDVI raster has no CRS. NDVI water mask skipped.")
+            return da
+
+        if water_gdf.crs is None:
+            _log("WARN", "DEA Waterbodies has no CRS. NDVI water mask skipped.")
+            return da
+
+        water_gdf = water_gdf.to_crs(da.rio.crs)
+        water_gdf = water_gdf[water_gdf.geometry.notna() & ~water_gdf.geometry.is_empty]
+
+        if water_gdf.empty:
+            _log("WARN", "DEA Waterbodies has no valid geometries. NDVI water mask skipped.")
+            return da
+
+        # rioxarray.clip with invert=True masks inside the supplied geometry.
+        masked = da.rio.clip(
+            water_gdf.geometry,
+            water_gdf.crs,
+            drop=False,
+            invert=True,
+            all_touched=True,
+        )
+
+        masked = masked.where(np.isfinite(masked))
+        masked.rio.write_crs(da.rio.crs, inplace=True)
+        masked.rio.write_nodata(np.nan, inplace=True)
+
+        #_log("OK", "NDVI masked by DEA Waterbodies.")
+        return masked
+
+    except Exception as e:
+        _log("WARN", f"NDVI waterbody masking failed and was skipped: {e}")
+        return da
+    
 @dataclass
 class VegConfig:
     """Inputs & knobs for vegetation processing."""
     chm_workspace: str
     catchment_path: str
     datetime_range: str  # e.g., "2000-01-01/2024-12-31"
+
+    # Optional sites input.
+    # If provided and valid, site-based vegetation outputs are produced.
+    # If missing/None/invalid, the module continues with catchment + riparian outputs only.
+    sites_path: Optional[str] = None
+
     catchment_crs: Optional[object] = None
 
     # STAC/DEA parameters
@@ -617,8 +703,21 @@ def veg_indices_and_c_factor(cfg: VegConfig):
 
     catch_gpkg = os.path.join(catch_datasets, f"{catchment_name} Data.gpkg")
     catch_layer = f"{catchment_name} Data"
-    all_sites_gpkg = os.path.join(sites_datasets, f"{catchment_name} Sites Data.gpkg")
+    all_sites_gpkg = os.path.join(
+        sites_datasets,
+        f"{catchment_name} Sites Data.gpkg"
+    )
+
     all_sites_gpkg_or_none = _existing_or_none(all_sites_gpkg)
+
+    if all_sites_gpkg_or_none is None:
+        _log(
+            "WARN",
+            f"Topography-generated site polygons not found: {all_sites_gpkg}. "
+            "Site-based vegetation outputs will be skipped."
+        )
+    else:
+        _log("OK", f"Using topography-generated site polygons: {all_sites_gpkg}")
 
     annual_ndvi_dir = os.path.join(ndvi_output, "Annual")
     annual_c_dir = os.path.join(c_factor_output, "Annual")
@@ -650,6 +749,7 @@ def veg_indices_and_c_factor(cfg: VegConfig):
 
     _log("OK", f"Using DEM from {_folder_label(topo_folder)}: {dem_projected_file}")
     stream_network = os.path.join(topo_folder, "Stream_Network.gpkg")
+    waterbodies_gpkg = os.path.join(topo_folder, "DEA_Waterbodies.gpkg")
 
     # ---------- STAC: cache gate ----------
     try:
@@ -787,6 +887,13 @@ def veg_indices_and_c_factor(cfg: VegConfig):
                 ndvi_aln = ndvi_clip.rio.reproject_match(dem_ref)
                 ndvi_aln.rio.write_nodata(np.nan, inplace=True)
 
+                # Mask NDVI where it overlaps DEA Waterbodies.
+                # Because C-factor is calculated from NDVI, this also masks C-factor.
+                ndvi_aln = _mask_raster_by_waterbodies(
+                    ndvi_aln,
+                    waterbodies_gpkg=waterbodies_gpkg,
+                )
+
                 c_factor = np.clip(np.exp(-2 * ndvi_aln), 0, 1)
                 cf_da = xr.DataArray(c_factor, coords=ndvi_aln.coords, dims=ndvi_aln.dims)
                 cf_da = cf_da.where(np.isfinite(ndvi_aln))
@@ -802,6 +909,13 @@ def veg_indices_and_c_factor(cfg: VegConfig):
                 ndvi_year = ndvi_med_year.rio.clip(gdf.geometry, gdf.crs, drop=True).rio.reproject_match(dem_ref)
                 ndvi_year = ndvi_year.where(np.isfinite(ndvi_year))
                 ndvi_year.rio.write_nodata(np.nan, inplace=True)
+
+                # Mask annual NDVI by DEA Waterbodies before calculating annual C-factor.
+                # Riparian NDVI later uses annual NDVI rasters, so riparian outputs are masked too.
+                ndvi_year = _mask_raster_by_waterbodies(
+                    ndvi_year,
+                    waterbodies_gpkg=waterbodies_gpkg,
+                )
 
                 c_year = xr.apply_ufunc(lambda x: np.clip(np.exp(-2 * x), 0, 1), ndvi_year)
                 c_year = c_year.where(np.isfinite(ndvi_year))
@@ -996,7 +1110,21 @@ def veg_indices_and_c_factor(cfg: VegConfig):
     if all_sites_gpkg_or_none is not None:
         try:
             sites_poly_gdf = gpd.read_file(all_sites_gpkg_or_none)
-            _log("OK", f"Site polygons loaded: {all_sites_gpkg_or_none}")
+
+            if sites_poly_gdf.empty:
+                _log("WARN", "Site polygons file is empty. Site-based summaries will be skipped.")
+                sites_poly_gdf = None
+            else:
+                if sites_poly_gdf.crs is None:
+                    raise ValueError(
+                        "Sites file has no CRS. Please define its CRS before running vegetation processing."
+                    )
+
+                if sites_poly_gdf.crs != dem_crs:
+                    sites_poly_gdf = sites_poly_gdf.to_crs(dem_crs)
+
+                _log("OK", f"Site polygons loaded and projected to DEM CRS: {all_sites_gpkg_or_none}")
+
         except Exception as e:
             _log("WARN", f"Could not load site polygons and site-based summaries will be skipped: {e}")
             sites_poly_gdf = None
@@ -1010,7 +1138,7 @@ def veg_indices_and_c_factor(cfg: VegConfig):
                 site_id = row.get("Site_id", idx)
                 site_geom = row.geometry
                 attrs = row.drop(labels="geometry").to_dict()
-                site_gdf = gpd.GeoDataFrame([attrs], geometry=[site_geom], crs=dem_crs)
+                site_gdf = gpd.GeoDataFrame([attrs], geometry=[site_geom], crs=sites_poly_gdf.crs)
                 site_vals: Dict[str, float] = {}
 
                 site_data_dir = os.path.join(sites_datasets, f"Site_{site_id}")
@@ -1165,7 +1293,64 @@ def veg_indices_and_c_factor(cfg: VegConfig):
     # all_gdf.to_file(all_sites_gpkg, driver="GPKG")
     # all_gdf.drop(columns="geometry").to_csv(all_sites_csv, index=False)
     # =========================================================================
+    # =========================
+    # Memory cleanup
+    # =========================
+    plt.close("all")
+
+    try:
+        del gdf, gdf_wgs84
+    except Exception:
+        pass
+
+    try:
+        del ST_gdf, riparian_gdf, riparian_buf
+    except Exception:
+        pass
+
+    try:
+        del sites_poly_gdf, WH_rows
+    except Exception:
+        pass
+
+    try:
+        del site_gdf, site_vals, site_geom, site_point_gdf
+    except Exception:
+        pass
+
+    try:
+        del dem_ref
+    except Exception:
+        pass
+
+    try:
+        del ds_year_parts, ds_year, ds_part
+    except Exception:
+        pass
+
+    try:
+        del ndvi_all, ndvi_med_year, ndvi_year, c_year
+    except Exception:
+        pass
+
+    try:
+        del red, nir, ndvi_ts, ndvi_clip, ndvi_aln, c_factor, cf_da
+    except Exception:
+        pass
+
+    try:
+        del out_image, out_img, rip_img, data, plot_arr
+    except Exception:
+        pass
+
+    try:
+        del riparian_summary_df, pivot_df, wide, merged, base_gdf
+    except Exception:
+        pass
 
     gc.collect()
+
+    _log("INFO", "Memory cleanup completed.")
     _log("OK", "Vegetation indices and C-factor processing completed.")
-    return all_sites_gpkg, dem_crs, sites_datasets, indices_output, annual_ndvi_dir, annual_c_dir
+
+    return

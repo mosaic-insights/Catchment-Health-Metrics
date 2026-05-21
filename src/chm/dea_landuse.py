@@ -275,10 +275,10 @@ def _plot_catchment_map(
         fontsize=11,
         fontweight="bold",
     )
-    ax.set_xlabel("Longitude (°)", fontsize=10, fontweight="bold")
-    ax.set_ylabel("Latitude (°)", fontsize=10, fontweight="bold")
+    ax.set_xlabel("Longitude (°)", fontsize=9, fontweight="bold")
+    ax.set_ylabel("Latitude (°)", fontsize=9, fontweight="bold")
 
-    ax.tick_params(axis="both", labelsize=10)
+    ax.tick_params(axis="both", labelsize=8)
     ax.xaxis.set_major_locator(MaxNLocator(nbins=5))
     ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
     ax.ticklabel_format(style="plain", axis="both", useOffset=False)
@@ -305,14 +305,14 @@ def _plot_timeseries(
         ax.plot(df_pct.index, df_pct[code], linewidth=1.3, label=f"{label}")
 
     ax.set_title(title, fontsize=11, fontweight="bold")
-    ax.set_xlabel("Year", fontsize=10, fontweight="bold")
-    ax.set_ylabel(ylabel, fontsize=10, fontweight="bold")
+    ax.set_xlabel("Year", fontsize=9, fontweight="bold")
+    ax.set_ylabel(ylabel, fontsize=9, fontweight="bold")
     years = df_pct.index.astype(int)
     ax.set_xticks(years)
     ax.set_xticklabels(years)
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
-    ax.tick_params(axis="both", labelsize=10)
+    ax.tick_params(axis="both", labelsize=8)
     ax.grid(True, linestyle="--", alpha=0.5)
 
     ax.legend(
@@ -407,6 +407,15 @@ def dea_landuse_change(cfg: DEALanduseConfig) -> Tuple[Path, Path]:
         pct = _clip_and_pct(clipped_tif, catch_gdf, class_codes)
         rows.append({"Year": year, **pct})
         _log("OK", f"Catchment percentages computed for {year}")
+        # Clean yearly raster arrays
+        plt.close("all")
+
+        try:
+            del pct
+        except Exception:
+            pass
+
+        gc.collect()
 
         if cfg.make_maps:
             try:
@@ -535,7 +544,39 @@ def dea_landuse_change(cfg: DEALanduseConfig) -> Tuple[Path, Path]:
                     )
                     _log("OK", f"Site {site_id}: percentage-point change plot saved")
 
+                    # =========================
+                    # Per-site cleanup
+                    # =========================
+                    plt.close("all")
+
+                    try:
+                        del sgdf
+                    except Exception:
+                        pass
+
+                    try:
+                        del site_df, site_df_named
+                    except Exception:
+                        pass
+
+                    try:
+                        del site_pp, site_pp_named
+                    except Exception:
+                        pass
+
+                    try:
+                        del series, pct
+                    except Exception:
+                        pass
+
+                    try:
+                        del base_site
+                    except Exception:
+                        pass
+
                     gc.collect()
+
+                    _log("INFO", f"Site {site_id}: memory cleanup completed.")
                     _log("OK", f"Site {site_id} completed")
             else:
                 _log("INFO", "No sites found; skipping site outputs.")
@@ -544,5 +585,54 @@ def dea_landuse_change(cfg: DEALanduseConfig) -> Tuple[Path, Path]:
     else:
         _log("INFO", "Site outputs disabled.")
 
+    # =========================
+    # Memory cleanup
+    # =========================
+    plt.close("all")
+
+    try:
+        del catch_gdf
+    except Exception:
+        pass
+
+    try:
+        del sites_gdf, sgdf
+    except Exception:
+        pass
+
+    try:
+        del catch_pct_df, catch_pct_df_named
+    except Exception:
+        pass
+
+    try:
+        del pp_change, pp_change_named
+    except Exception:
+        pass
+
+    try:
+        del site_df, site_df_named
+    except Exception:
+        pass
+
+    try:
+        del site_pp, site_pp_named
+    except Exception:
+        pass
+
+    try:
+        del rows, series
+    except Exception:
+        pass
+
+    try:
+        del pct, base, base_site
+    except Exception:
+        pass
+
+    gc.collect()
+
+    _log("INFO", "Memory cleanup completed.")
     _log("OK", "DEA land cover processing completed.")
+
     return dea_ds, sites_ds

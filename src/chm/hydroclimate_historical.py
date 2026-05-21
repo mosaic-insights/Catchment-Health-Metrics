@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 import geopandas as gpd
+import gc
 
 # rioxarray activates .rio accessors (CRS, transform, clip)
 import rioxarray  # noqa: F401
@@ -565,8 +566,81 @@ def hydroclimate_historical(cfg: HistoricalConfig) -> str:
                             print(f"[OK] site {sid} combined annual CSV + subplot")
                     else:
                         print(f"[INFO] site {sid}: no daily data assembled (check .nc or geometry).")
+
+                    # =========================
+                    # Per-site cleanup
+                    # =========================
+                    plt.close("all")
+
+                    try:
+                        del geom_list
+                    except Exception:
+                        pass
+
+                    try:
+                        del site_df, out_daily, annual_site
+                    except Exception:
+                        pass
+
+                    try:
+                        del parts, df_v, vdf
+                    except Exception:
+                        pass
+
+                    try:
+                        del da, daily_mean, masked
+                    except Exception:
+                        pass
+
+                    gc.collect()
+
+                    print(f"[INFO] site {sid}: memory cleanup completed.")
         except Exception as e:
             print(f"[ERROR] site-level CSVs/plots failed: {e}")
 
+    # =========================
+    # Memory cleanup
+    # =========================
+    plt.close("all")
+
+    try:
+        del catch_gdf, catch_geoms, catch_union, catch_cent
+    except Exception:
+        pass
+
+    try:
+        del sites_gdf, geom_list
+    except Exception:
+        pass
+
+    try:
+        del ds, da, clipped, masked_mean, daily_mean, masked
+    except Exception:
+        pass
+
+    try:
+        del catch_df, c_daily, annual_catch, csv_df, out_df
+    except Exception:
+        pass
+
+    try:
+        del daily_df_by_var, series_parts, parts
+    except Exception:
+        pass
+
+    try:
+        del df, df_v, vdf, site_df, out_daily, annual_site
+    except Exception:
+        pass
+
+    try:
+        del nc_by_var
+    except Exception:
+        pass
+
+    gc.collect()
+
+    print("[INFO] Memory cleanup completed.")
     print("Unified historical hydroclimate processing complete.")
-    return hist_folder
+
+    return

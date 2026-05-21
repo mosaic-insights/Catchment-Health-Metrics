@@ -3,6 +3,7 @@ from __future__ import annotations
 # ---------- stdlib ----------
 import os
 import re
+import gc
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -441,7 +442,30 @@ def national_roads(cfg: RoadsConfig) -> Tuple[str, str]:
                     _log("OK", f"Site {sid}: exposure time-series plot saved")
                 finally:
                     plt.close(fig)
+            # Clean per-site arrays/objects
+            plt.close("all")
 
+            try:
+                del site_gdf, site_roads
+            except Exception:
+                pass
+
+            try:
+                del sdr, twi, road_ras, road_twi
+            except Exception:
+                pass
+
+            try:
+                del sorted_vals, cum_counts, cum_pct_site, cum_frac_site
+            except Exception:
+                pass
+
+            try:
+                del sdr_auc_ts, exposure_ts, sdr_line_profiles
+            except Exception:
+                pass
+
+            gc.collect()
             _log("OK", f"Site {sid} completed")
 
         except Exception as e:
@@ -462,5 +486,44 @@ def national_roads(cfg: RoadsConfig) -> Tuple[str, str]:
         _log("WARN", f"Could not write updated sites GPKG: {e}")
     """
 
+    # =========================
+    # Memory cleanup
+    # =========================
+    plt.close("all")
+
+    try:
+        del catch, catch_wgs, roads, roads_clip
+    except Exception:
+        pass
+
+    try:
+        del sites, site_gdf, site_roads
+    except Exception:
+        pass
+
+    try:
+        del sdr, twi, road_ras, road_twi
+    except Exception:
+        pass
+
+    try:
+        del sorted_vals, cum_counts, cum_pct_site, cum_frac_site
+    except Exception:
+        pass
+
+    try:
+        del sdr_auc_ts, exposure_ts, sdr_line_profiles
+    except Exception:
+        pass
+
+    try:
+        del vals, series, years
+    except Exception:
+        pass
+
+    gc.collect()
+
+    _log("INFO", "Memory cleanup completed.")
     _log("OK", "National roads processing completed")
-    return all_sites_gpkg, sites_ds
+
+    return

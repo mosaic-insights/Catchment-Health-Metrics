@@ -549,7 +549,39 @@ def landuse_2023(cfg: LanduseRiskConfig) -> Tuple[Path, Path]:
                                 out_png=out_png,
                             )
                             _log("OK", f"Site {site_id}: exposure time-series saved for {cls}")
+                    # =========================
+                    # Per-site cleanup
+                    # =========================
+                    plt.close("all")
 
+                    try:
+                        del sgdf
+                    except Exception:
+                        pass
+
+                    try:
+                        del sdr_ref, lu_on_sdr, sdr_clip, lu_clip
+                    except Exception:
+                        pass
+
+                    try:
+                        del sarr, lu_vals, sel, s
+                    except Exception:
+                        pass
+
+                    try:
+                        del valid, mask_lu, mask_in
+                    except Exception:
+                        pass
+
+                    try:
+                        del auc_ts_map, line_profiles_map
+                    except Exception:
+                        pass
+
+                    gc.collect()
+
+                    _log("INFO", f"Site {site_id}: memory cleanup completed.")
                     _log("OK", f"Site {site_id} completed")
                 except Exception as e:
                     _log("WARN", f"[site {row.get('Site_id','NA')}] {e}")
@@ -735,7 +767,39 @@ def landuse_2023(cfg: LanduseRiskConfig) -> Tuple[Path, Path]:
                             out_png=out_png,
                         )
                         _log("OK", f"Site {site_id}: exposure time-series saved for {gname}")
+                # =========================
+                # Per-site cleanup
+                # =========================
+                plt.close("all")
 
+                try:
+                    del sgdf
+                except Exception:
+                    pass
+
+                try:
+                    del sdr_ref, lu_on_sdr, sdr_clip, lu_clip
+                except Exception:
+                    pass
+
+                try:
+                    del sarr, lu_vals, sel, s
+                except Exception:
+                    pass
+
+                try:
+                    del valid, mask_lu, mask_in
+                except Exception:
+                    pass
+
+                try:
+                    del auc_ts_map, line_profiles_map
+                except Exception:
+                    pass
+
+                gc.collect()
+
+                _log("INFO", f"Site {site_id}: memory cleanup completed.")
                 _log("OK", f"Site {site_id} completed")
             except Exception as e:
                 _log("WARN", f"[site {row.get('Site_id','NA')}] {e}")
@@ -752,5 +816,54 @@ def landuse_2023(cfg: LanduseRiskConfig) -> Tuple[Path, Path]:
     else:
         _log("WARN", f"Sites GPKG missing; site outputs skipped: {all_sites_gpkg}")
 
+    # =========================
+    # Memory cleanup
+    # =========================
+    plt.close("all")
+
+    try:
+        lu_r_full.close()
+    except Exception:
+        pass
+
+    try:
+        del catch_gdf, gdf_3857, sites_gdf, sgdf
+    except Exception:
+        pass
+
+    try:
+        del lu_vec, lu_catch, lu_site
+    except Exception:
+        pass
+
+    try:
+        del rds_raw, rds, sdr_ref, lu_on_sdr, sdr_clip, lu_clip
+    except Exception:
+        pass
+
+    try:
+        del data, arr, out, sarr, lu_vals, sel, s
+    except Exception:
+        pass
+
+    try:
+        del valid, mask_lu, mask_in
+    except Exception:
+        pass
+
+    try:
+        del auc_ts_map, line_profiles_map, updates_df
+    except Exception:
+        pass
+
+    try:
+        del img, profile, prof, rev, class_to_group
+    except Exception:
+        pass
+
+    gc.collect()
+
+    _log("INFO", "Memory cleanup completed.")
     _log("OK", "Landuse raster branch complete.")
+
     return land, sds

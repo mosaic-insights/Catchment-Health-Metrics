@@ -747,8 +747,6 @@ def _plot_raster_with_overlays(
         else:
             ax.set_aspect("equal", adjustable="box")
 
-        _add_matched_colorbar(fig, ax, im, colorbar_label or "Value")
-
         _add_matched_colorbar(fig, ax, im, colorbar_label or "Value", pad=0.18)
 
         ax.set_title(title, **(title_kwargs or {"fontsize": 11, "fontweight": "bold"}))
@@ -1501,5 +1499,25 @@ def dem_and_terrain(
 
     gc.collect()
     _log("OK", "DEM and topography processing completed.")
+    # =========================
+    # Memory cleanup
+    # =========================
+    plt.close("all")
 
-    return dem_projected_file, all_sites_gpkg, sites_datasets, sites_plots
+    for obj_name in [
+        "dem_data", "acc", "fdir", "inflated",
+        "terrain_layers", "site_rows",
+        "streams_gdf", "all_gdf", "sites_gdf",
+        "gdf_catch", "grid"
+    ]:
+        try:
+            del locals()[obj_name]
+        except Exception:
+            pass
+
+    gc.collect()
+    _log("INFO", "Memory cleanup completed.")
+    _log("OK", "DEM and topography processing completed.")
+
+    # No return needed if you do not use these outputs
+    return

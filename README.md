@@ -291,7 +291,7 @@ If you use this package in your research, report, or project, please cite it as:
 
 **APA style:**
 
-Khaledi, J., Nyman, P., & Richards, P. (2026). *Catchment Health Metrics (CHM): A Python package for catchment-scale environmental analysis* (Version 0.1.0) [Software]. GitHub. https://github.com/mosaic-insights/Catchment-Health-Metrics
+Khaledi, J., Nyman, P., & Richards, P. (2026). *Catchment Health Metrics (CHM): A Python package for catchment environmental condition analysis* (Version 0.1.0) [Software]. GitHub. https://github.com/mosaic-insights/Catchment-Health-Metrics
 
 **BibTeX:**
 ```bibtex

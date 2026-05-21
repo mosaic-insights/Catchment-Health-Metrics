@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 import glob
+import gc
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -947,6 +948,30 @@ def rusle_and_sdr_rusle(cfg: RusleConfig) -> Tuple[str, str]:
             _log("INFO", f"Completed all site processing for year {year}")
 
         _log("OK", f"RUSLE and SDR-RUSLE {year} processed.")
+        # Clean large per-year arrays
+        plt.close("all")
+
+        try:
+            del c_arr, sdr_arr
+        except Exception:
+            pass
+
+        try:
+            del rusle_year, sdr_rusle_year
+        except Exception:
+            pass
+
+        try:
+            del mask_np, valid_s
+        except Exception:
+            pass
+
+        try:
+            del out_img, clipped
+        except Exception:
+            pass
+
+        gc.collect()
 
     # ==== 6) outputs ====
     # 6a) Catchment CSV
@@ -1079,5 +1104,59 @@ def rusle_and_sdr_rusle(cfg: RusleConfig) -> Tuple[str, str]:
 
     _log("INFO", f"Total years processed: {len(target_years)}")
     _log("INFO", f"Outputs stored in: {_folder_label(catchment_folder)}")
+    # =========================
+    # Memory cleanup
+    # =========================
+    plt.close("all")
+
+    try:
+        dem_xr.close()
+    except Exception:
+        pass
+
+    try:
+        del ls_band, ls_array, k_array, p_array, r_array
+    except Exception:
+        pass
+
+    try:
+        del c_arr, sdr_arr, rusle_year, sdr_rusle_year
+    except Exception:
+        pass
+
+    try:
+        del catch_mask, water_mask, mask_np, valid, valid_s
+    except Exception:
+        pass
+
+    try:
+        del catch_gdf, sites_gdf, sites_pts_user
+    except Exception:
+        pass
+
+    try:
+        del catch_rows, catch_df, site_tables, site_gpkg_rows
+    except Exception:
+        pass
+
+    try:
+        del site_poly, one_site_point, pts_match
+    except Exception:
+        pass
+
+    try:
+        del out_img, clipped, clipped_meta, tmp_meta
+    except Exception:
+        pass
+
+    try:
+        del df
+    except Exception:
+        pass
+
+    gc.collect()
+
+    _log("INFO", "Memory cleanup completed.")
     _log("OK", "Completed RUSLE using provided R-factor.")
-    return all_sites_gpkg, sites_datasets
+
+    return

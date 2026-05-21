@@ -28,6 +28,7 @@ from shapely.geometry import Point
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator, FormatStrFormatter
 from mpl_toolkits.axes_grid1 import make_axes_locatable
+import gc
 
 # ============================ Configuration ============================
 
@@ -853,6 +854,18 @@ def process_surface_and_groundwater_connectivity(
             _write_single_band(os.path.join(sdr_output_dir, name), data, dem_meta)
 
         _log("OK", f"SDR {year} processed.")
+        # Clean yearly SDR arrays after each year
+        try:
+            del c_factor, Cth, Cth_raster, acc_Cth, Av_Cth
+        except Exception:
+            pass
+
+        try:
+            del Ddn, Dup, Ddn_safe, Dup_safe, IC, SDR, yearly_products
+        except Exception:
+            pass
+
+        gc.collect()
 
         # -------- Catchment context plots for yearly layers --------
         yearly_context_layers = [
@@ -959,6 +972,69 @@ def process_surface_and_groundwater_connectivity(
             except Exception as e:
                 _log("WARN", f"Error processing site {row.get('Site_id', idx)}: {e}")
                 continue
+
+    # =========================
+    # Memory cleanup
+    # =========================
+    plt.close("all")
+
+    try:
+        del dem, dem_grid, dem_filled, inflated
+    except Exception:
+        pass
+
+    try:
+        del slope_ratio, slope_rad, slope_deg, aspect_rad
+    except Exception:
+        pass
+
+    try:
+        del fdir, acc, area_m2, streams_mask
+    except Exception:
+        pass
+
+    try:
+        del Sth, Sth_raster, acc_Sth, acc_no0, Av_Sth
+    except Exception:
+        pass
+
+    try:
+        del TWI, specific_area, xi, slope_pct, Si, m, LSi
+    except Exception:
+        pass
+
+    try:
+        del Cth, Cth_raster, acc_Cth, Av_Cth
+    except Exception:
+        pass
+
+    try:
+        del Ddn, Dup, Ddn_safe, Dup_safe, IC, SDR, yearly_products
+    except Exception:
+        pass
+
+    try:
+        del c_factor, waterbodies_mask, distance_to_stream, traversal_edges
+    except Exception:
+        pass
+
+    try:
+        del sites_gdf, sites_pts, site_gdf, one_site_point
+    except Exception:
+        pass
+
+    try:
+        del _catch_gdf, full, clipped, out_img
+    except Exception:
+        pass
+
+    try:
+        del grid
+    except Exception:
+        pass
+
+    gc.collect()
+    _log("INFO", "Memory cleanup completed.")
 
     return all_sites_gpkg, LS_path, TWI_path, sdr_output_dir, sites_datasets
 
@@ -1152,7 +1228,38 @@ def ndvi_cumulative_risk_profiles(CHM_Work_Space: str, Catchment_Shapefile_Path:
             plt.close(fig)
 
     _log("OK", "NDVI cumulative exposure profiles by SDR are completed.")
+    # =========================
+    # Memory cleanup
+    # =========================
+    plt.close("all")
 
+    try:
+        del sites_gdf
+    except Exception:
+        pass
+
+    try:
+        del ndvi, sdr, ndvi_img, sdr_img
+    except Exception:
+        pass
+
+    try:
+        del sdr_vals, sdr_sorted, cum_pct, cum_frac
+    except Exception:
+        pass
+
+    try:
+        del line_profiles, auc_series, auc_vals
+    except Exception:
+        pass
+
+    try:
+        del arr
+    except Exception:
+        pass
+
+    gc.collect()
+    _log("INFO", "Memory cleanup completed.")
 
 # ============================ Convenience wrapper ============================
 
