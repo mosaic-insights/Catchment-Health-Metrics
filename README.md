@@ -70,11 +70,14 @@ python -m ipykernel install --user --name chm --display-name "Python (chm)"
 ```
 
 **Step 5 — Run in Jupyter Lab:**
-In Anaconda Prompt: conda activate chm 
+
+In Anaconda Prompt: 
+
+conda activate chm 
 
 jupyter lab
 
-select: Python (chm) as the kernel
+When jupyter lab is opened, select: Python (chm) as the kernel
 
 
 ### Updating the package
