@@ -63,17 +63,18 @@ cd C:\GitHub\Catchment-Health-Metrics
 pip install -e .
 ```
 
-**Step 4 — Install Jupyter kernel (optional but recommended):**
+**Step 4 — Register the environment as a Jupyter kernel:**
 
 ```bash
-pip install ipykernel
 python -m ipykernel install --user --name chm --display-name "Python (chm)"
 ```
 
-**Step 5 — Run in Jupyter:**
-Open Jupyter Notebook/Lab and select:
+**Step 5 — Run in Jupyter Lab:**
+In Anaconda Prompt: conda activate chm 
 
-**Python (chm)** kernel
+jupyter lab
+
+select: Python (chm) as the kernel
 
 
 ### Updating the package
