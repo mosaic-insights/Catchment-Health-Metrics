@@ -29,6 +29,7 @@ import rioxarray as rxr
 from rasterio.mask import mask as rio_mask
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from rasterio.transform import array_bounds
+from rasterio.enums import Resampling
 from shapely.geometry import Point
 import fiona  # only used for fiona.remove(...)
 
@@ -350,6 +351,7 @@ def _plot_raster_context_in_degrees(
     )
 
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    plot_data = np.ma.masked_invalid(plot_data)
     im = ax.imshow(plot_data, cmap="viridis", extent=extent, origin="upper", interpolation="nearest")
     _add_matched_colorbar(fig, ax, im, title)
 
@@ -402,6 +404,7 @@ def _plot_clipped_raster_in_degrees(
     )
 
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    plot_data = np.ma.masked_invalid(plot_data)
     im = ax.imshow(plot_data, extent=extent, cmap="viridis", origin="upper", interpolation="nearest")
     _add_matched_colorbar(fig, ax, im, title)
 
@@ -630,11 +633,8 @@ def _write_catchment_annual_context_plots(
 
                 try:
                     with rio.open(raster_path) as src:
-                        arr = src.read(1).astype("float32")
-
-                        if src.nodata is not None:
-                            arr = np.where(arr == src.nodata, np.nan, arr)
-
+                        arr = src.read(1, masked=True)
+                        arr = arr.filled(np.nan).astype("float32")
                         arr = _clean_index_array(arr, short_name)
 
                         src_meta = {
@@ -900,32 +900,74 @@ def veg_indices_and_c_factor(cfg: VegConfig):
                 cf_da.rio.write_crs(ndvi_aln.rio.crs, inplace=True)
                 cf_da.rio.write_nodata(np.nan, inplace=True)
 
-            ndvi_all = (ds_year["nbart_nir"] - ds_year["nbart_red"]) / (ds_year["nbart_nir"] + ds_year["nbart_red"])
-            if ndvi_all.sizes.get("time", 0) == 0:
-                _log("WARN", f"No valid NDVI samples in {year}; skipping annual save.")
-            else:
-                ndvi_med_year = ndvi_all.median(dim="time", skipna=True)
-
-                ndvi_year = ndvi_med_year.rio.clip(gdf.geometry, gdf.crs, drop=True).rio.reproject_match(dem_ref)
-                ndvi_year = ndvi_year.where(np.isfinite(ndvi_year))
-                ndvi_year.rio.write_nodata(np.nan, inplace=True)
-
-                # Mask annual NDVI by DEA Waterbodies before calculating annual C-factor.
-                # Riparian NDVI later uses annual NDVI rasters, so riparian outputs are masked too.
-                ndvi_year = _mask_raster_by_waterbodies(
-                    ndvi_year,
-                    waterbodies_gpkg=waterbodies_gpkg,
-                )
-
-                c_year = xr.apply_ufunc(lambda x: np.clip(np.exp(-2 * x), 0, 1), ndvi_year)
-                c_year = c_year.where(np.isfinite(ndvi_year))
-                c_year.rio.write_crs(ndvi_year.rio.crs, inplace=True)
-                c_year.rio.write_nodata(np.nan, inplace=True)
-
-                ndvi_year.rio.to_raster(ndvi_fp_y)
-                c_year.rio.to_raster(c_fp_y)
-                _log("OK", f"Wrote annual NDVI/C rasters for {year}")
-
+            # ---------- Annual NDVI and C-factor ----------
+            # ---------- Annual NDVI and C-factor ----------
+            red_all = ds_year["nbart_red"].astype("float32")
+            nir_all = ds_year["nbart_nir"].astype("float32")
+            # DEA optical NoData is commonly 0. Remove it BEFORE NDVI.
+            valid = (
+                np.isfinite(red_all) &
+                np.isfinite(nir_all) &
+                (red_all > 0) &
+                (nir_all > 0)
+            )
+            denom_all = nir_all + red_all
+            ndvi_all = xr.where(
+                valid & (denom_all > 0),
+                (nir_all - red_all) / denom_all,
+                np.nan
+            )
+            # Keep physical NDVI range only
+            ndvi_all = ndvi_all.where(
+                np.isfinite(ndvi_all) &
+                (ndvi_all >= -1.0) &
+                (ndvi_all <= 1.0)
+            )
+            valid_pixel_count = ndvi_all.count(dim="time")
+            ndvi_med_year = ndvi_all.median(dim="time", skipna=True)
+            # Remove pixels with too few valid observations
+            ndvi_med_year = ndvi_med_year.where(valid_pixel_count >= 1)
+            # Make CRS / nodata explicit BEFORE clip/reproject
+            ndvi_med_year.rio.write_crs(dem_crs, inplace=True)
+            ndvi_med_year.rio.write_nodata(np.nan, inplace=True)
+            # Clip and align to DEM
+            ndvi_year = ndvi_med_year.rio.clip(
+                gdf.geometry,
+                gdf.crs,
+                drop=True,
+                all_touched=True
+            )
+            ndvi_year.rio.write_crs(dem_crs, inplace=True)
+            ndvi_year.rio.write_nodata(np.nan, inplace=True)
+            ndvi_year = ndvi_year.rio.reproject_match(
+                dem_ref,
+                resampling=Resampling.bilinear,
+                nodata=np.nan
+            )
+            # Clean AFTER reprojection
+            ndvi_year = ndvi_year.where(
+                np.isfinite(ndvi_year) &
+                (ndvi_year >= -1.0) &
+                (ndvi_year <= 1.0)
+            )
+            ndvi_year.rio.write_crs(dem_ref.rio.crs, inplace=True)
+            ndvi_year.rio.write_nodata(np.nan, inplace=True)
+            # Optional waterbody mask
+            ndvi_year = _mask_raster_by_waterbodies(
+                ndvi_year,
+                waterbodies_gpkg=waterbodies_gpkg,
+            )
+            # C-factor only from valid NDVI
+            c_year = xr.where(
+                np.isfinite(ndvi_year),
+                np.clip(np.exp(-2.0 * ndvi_year), 0.0, 1.0),
+                np.nan
+            )
+            c_year.rio.write_crs(dem_ref.rio.crs, inplace=True)
+            c_year.rio.write_nodata(np.nan, inplace=True)
+            ndvi_year.rio.to_raster(ndvi_fp_y, dtype="float32", nodata=np.nan)
+            c_year.rio.to_raster(c_fp_y, dtype="float32", nodata=np.nan)
+            _log("OK", f"Wrote annual NDVI/C rasters for {year}")
             del ds_year_parts, ds_year, ndvi_all
             gc.collect()
 
