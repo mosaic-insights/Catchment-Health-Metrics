@@ -85,9 +85,11 @@ When jupyter lab is opened, select: Python (chm) as the kernel
 If there are updates in the GitHub repository:
 
 ```bash
+git cd "C:\GitHub\Catchment-Health-Metrics"
+git pull
+
 conda activate chm
 cd C:\GitHub\Catchment-Health-Metrics
-git pull
 pip install -e .
 ```
 
