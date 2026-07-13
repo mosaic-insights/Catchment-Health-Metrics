@@ -781,67 +781,196 @@ def _site_location_map(
     catch_gdf: Optional[gpd.GeoDataFrame],
     site_geom,
     sid: int,
-    sites_crs=None
+    sites_crs=None,
 ) -> Optional[Path]:
     try:
-        if site_geom is None or (hasattr(site_geom, "is_empty") and site_geom.is_empty):
+        if site_geom is None or (
+            hasattr(site_geom, "is_empty") and site_geom.is_empty):
             return None
+        site_gdf = gpd.GeoDataFrame(
+            {"Site_id": [sid]},
+            geometry=[site_geom],
+            crs=sites_crs,)
+        if site_gdf.crs is None:
+            if catch_gdf is None or catch_gdf.crs is None:
+                _log(
+                    "WARN",
+                    f"Site {sid}: site and catchment CRS are unavailable.")
+                return None
+            site_gdf = site_gdf.set_crs(
+                catch_gdf.crs,
+                allow_override=True,)
 
-        site_gdf = gpd.GeoDataFrame({"Site_id": [sid]}, geometry=[site_geom], crs=sites_crs)
+        site_plot = site_gdf.to_crs(epsg=4326)
+        catch_plot = None
+        if catch_gdf is not None and not catch_gdf.empty:
+            if catch_gdf.crs is None:
+                _log(
+                    "WARN",
+                    f"Site {sid}: catchment has no CRS; "
+                    "location map cannot be plotted in degrees."
+                )
+                return None
+            catch_plot = catch_gdf.to_crs(epsg=4326)
 
-        if catch_gdf is not None and catch_gdf.crs is not None:
-            if site_gdf.crs is None:
-                site_gdf = site_gdf.set_crs(catch_gdf.crs, allow_override=True)
-            elif str(site_gdf.crs) != str(catch_gdf.crs):
-                site_gdf = site_gdf.to_crs(catch_gdf.crs)
+        out_dir = (
+            base
+            / cfg.sites_plots_dir
+            / f"Site_{sid}")
 
-        out_dir = base / cfg.sites_plots_dir / f"Site_{sid}"
-        out_dir.mkdir(parents=True, exist_ok=True)
+        out_dir.mkdir(
+            parents=True,
+            exist_ok=True,)
+
         out_png = out_dir / f"Site_{sid}_Location.png"
+        if catch_plot is not None and not catch_plot.empty:
+            minx, miny, maxx, maxy = catch_plot.total_bounds
+        else:
+            minx, miny, maxx, maxy = site_plot.total_bounds
 
-        fig, ax = plt.subplots(figsize=(6.8, 6.0))
+        width = max(maxx - minx, 1e-9)
+        height = max(maxy - miny, 1e-9)
+        aspect = width / height
 
-        if catch_gdf is not None and not catch_gdf.empty:
+        if aspect >= 1:
+            fig_w = min(max(6.0 * aspect, 5.0), 11.0)
+            fig_h = 6.0
+        else:
+            fig_w = 6.0
+            fig_h = min(max(6.0 / aspect, 5.0), 11.0)
+
+        fig, ax = plt.subplots(
+            figsize=(fig_w, fig_h)
+        )
+        if catch_plot is not None and not catch_plot.empty:
             try:
-                catch_gdf.boundary.plot(ax=ax, color="black", linewidth=1.0, zorder=1)
+                catch_plot.boundary.plot(
+                    ax=ax,
+                    color="black",
+                    linewidth=1.0,
+                    zorder=1,
+                )
             except Exception:
-                catch_gdf.plot(ax=ax, facecolor="none", edgecolor="black", linewidth=1.0, zorder=1)
+                catch_plot.plot(
+                    ax=ax,
+                    facecolor="none",
+                    edgecolor="black",
+                    linewidth=1.0,
+                    zorder=1,)
 
-        gtype = site_gdf.geom_type.iloc[0] if not site_gdf.empty else ""
+        gtype = (
+            site_plot.geom_type.iloc[0]
+            if not site_plot.empty
+            else ""
+        )
+
         if gtype in {"Polygon", "MultiPolygon"}:
-            site_gdf.boundary.plot(ax=ax, color="crimson", linewidth=1.8, zorder=3)
-            site_gdf.plot(ax=ax, facecolor="none", edgecolor="crimson", linewidth=1.8, zorder=3)
+            site_plot.boundary.plot(
+                ax=ax,
+                color="crimson",
+                linewidth=1.8,
+                zorder=3,
+            )
+
         elif gtype in {"LineString", "MultiLineString"}:
-            site_gdf.plot(ax=ax, color="crimson", linewidth=2.0, zorder=3)
+            site_plot.plot(
+                ax=ax,
+                color="crimson",
+                linewidth=2.0,
+                zorder=3,
+            )
+
         else:
-            site_gdf.plot(ax=ax, color="crimson", markersize=35, zorder=3)
+            site_plot.plot(
+                ax=ax,
+                color="crimson",
+                markersize=35,
+                zorder=3,
+            )
 
-        ax.set_title(f"Site {sid} – Location within Catchment", fontsize=11, fontweight="bold", pad=6)
-        ax.set_xlabel("Longitude", fontsize=10, fontweight="bold")
-        ax.set_ylabel("Latitude", fontsize=10, fontweight="bold")
-        ax.xaxis.set_major_locator(MaxNLocator(nbins=4))
-        ax.yaxis.set_major_locator(MaxNLocator(nbins=4))
-        ax.tick_params(axis="both", labelsize=10)
-        ax.grid(True, linestyle="--", alpha=0.6)
+        # -------------------------------------------------------------
+        # Plot title and geographic axes
+        # -------------------------------------------------------------
+        ax.set_title(
+            f"Site {sid} – Location within Catchment",
+            fontsize=11,
+            fontweight="bold",
+            pad=6,
+        )
 
-        if catch_gdf is not None and not catch_gdf.empty:
-            minx, miny, maxx, maxy = catch_gdf.total_bounds
-        else:
-            minx, miny, maxx, maxy = site_gdf.total_bounds
-            dx = (maxx - minx) or 1.0
-            dy = (maxy - miny) or 1.0
-            minx, maxx = minx - 0.1 * dx, maxx + 0.1 * dx
-            miny, maxy = miny - 0.1 * dy, maxy + 0.1 * dy
-        ax.set_xlim(minx, maxx)
-        ax.set_ylim(miny, maxy)
+        ax.set_xlabel(
+            "Longitude (°)",
+            fontsize=10,
+            fontweight="bold",
+        )
 
+        ax.set_ylabel(
+            "Latitude (°)",
+            fontsize=10,
+            fontweight="bold",
+        )
+
+        ax.xaxis.set_major_locator(
+            MaxNLocator(nbins=4)
+        )
+
+        ax.yaxis.set_major_locator(
+            MaxNLocator(nbins=4)
+        )
+
+        ax.tick_params(
+            axis="both",
+            labelsize=10,
+        )
+
+        # Prevent scientific notation / coordinate offsets
+        ax.ticklabel_format(
+            style="plain",
+            axis="both",
+            useOffset=False,
+        )
+
+        ax.grid(
+            True,
+            linestyle="--",
+            alpha=0.6,
+        )
+        mean_lat = (miny + maxy) / 2.0
+
+        ax.set_aspect(
+            1 / np.cos(np.deg2rad(mean_lat)),
+            adjustable="box",
+        )
+        xpad = width * 0.02
+        ypad = height * 0.02
+
+        ax.set_xlim(
+            minx - xpad,
+            maxx + xpad,
+        )
+
+        ax.set_ylim(
+            miny - ypad,
+            maxy + ypad,
+        )
         fig.tight_layout()
-        fig.savefig(out_png, dpi=cfg.default_dpi)
+
+        fig.savefig(
+            out_png,
+            dpi=cfg.default_dpi,
+            bbox_inches="tight",
+        )
+
         plt.close(fig)
+
         return out_png
 
     except Exception as e:
-        _log("WARN", f"Site {sid} location map failed: {e}")
+        _log(
+            "WARN",
+            f"Site {sid} location map failed: {e}"
+        )
+
         return None
 
 

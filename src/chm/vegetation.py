@@ -411,7 +411,7 @@ def _plot_clipped_raster_in_degrees(
     #_plot_valid_raster_outline(ax, plot_data, extent, color="black", linewidth=1.0)
 
     if boundary_plot is not None and not boundary_plot.empty:
-        boundary_plot.boundary.plot(ax=ax, color="black", linewidth=1.2)
+        #boundary_plot.boundary.plot(ax=ax, color="black", linewidth=1.2)
         _set_axis_limits_from_gdf(ax, boundary_plot, pad_fraction=0.02)
     else:
         _apply_small_plot_padding(ax, extent, pad_fraction=0.02)
