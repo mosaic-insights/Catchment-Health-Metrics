@@ -57,9 +57,9 @@ class ConnectivityConfig:
     chm_workspace: str
     catchment_path: str
     catchment_crs: Optional[str] = None
-    sdr_max: float = 0.8
+    sdr_max: float = 0.9
     ic0: float = 0.5
-    k: float = 1.0
+    k: float = 3
     stream_area_threshold_m2: float = 1.3e4  # ≈ 13,000 m²
 
 
